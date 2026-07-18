@@ -1,0 +1,574 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0D46B81E925EC66430B5892E /* PlantArtworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */; };
+		11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */; };
+		1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */; };
+		1AD5193889E6E935D13C3336 /* RealtimeAudioIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */; };
+		1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */; };
+		2276E7EBC1FE747D071C6414 /* CameraCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 600BD03E36121532166372D4 /* CameraCaptureView.swift */; };
+		2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6237A24CE1893E70859F6D7 /* PlantReading.swift */; };
+		2F526B588BA296AB751A2BBC /* SensorChartSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6EC131A2D56E78478954626 /* SensorChartSheet.swift */; };
+		4394C6727D115B590FF2A08E /* PlantConversationBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */; };
+		4F93921AB701B38ADC890BA3 /* QwenRealtimeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */; };
+		519E46F640471AFB255D3BD9 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = B9338983599653E0F6876F35 /* GRDB */; };
+		527F5A12260177CF1C616599 /* OpenAICompatibleClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */; };
+		624FE57C9547F99D53D401F5 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A12282A1F665039788BEE3 /* ContentView.swift */; };
+		728BB87E8B19F0BFF6535A85 /* DayDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */; };
+		753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */; };
+		76A30422EC98C370886FB859 /* PlantBluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */; };
+		7B5D40C2BEEC751E7288F985 /* RealtimeConversationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */; };
+		7E12548C2451BB279E1246B9 /* HistoryTransferProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */; };
+		808EC7CEA736C9B0C18E8E57 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEFF091310D4BDE120ECE51 /* DetailView.swift */; };
+		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
+		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
+		A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */; };
+		A98AE3F049FF7DF91F9186D3 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */; };
+		AA45D0AF5CBD31EE42D36021 /* AISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48D7300B5B0307794AED6BE /* AISettingsView.swift */; };
+		B373EA7C0E6646A0AC86D57A /* AnimationDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */; };
+		BC7182B5EDC20C1864582396 /* HistoryTransferProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */; };
+		C73A929F85876992944F91A3 /* PlantArtworkCropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */; };
+		C756635B10D1D60457FCCBEA /* PlantDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */; };
+		D38300DF3DB8C01960656B0D /* QwenRealtimeConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */; };
+		D9359F9D5D564D1A7B3E19B0 /* OpenAICompatibleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */; };
+		DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFB78923A16E617E7CFEE47A /* TextConversationView.swift */; };
+		DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */; };
+		EDCE489BC5ABA6899AEBC3D6 /* AIConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */; };
+		EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		86BB62DC7739A9759C543C40 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 994FC882B3AAAF30FDAD85BA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 742B46E52623C1067DF1332E;
+			remoteInfo = PlantTalkBLE;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		05099F394FC182A10A30211A /* PlantDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabase.swift; sourceTree = "<group>"; };
+		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
+		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
+		0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabaseTests.swift; sourceTree = "<group>"; };
+		14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocol.swift; sourceTree = "<group>"; };
+		1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeProtocolTests.swift; sourceTree = "<group>"; };
+		230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClientTests.swift; sourceTree = "<group>"; };
+		3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationHistoryView.swift; sourceTree = "<group>"; };
+		4EEFF091310D4BDE120ECE51 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
+		5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkCropTests.swift; sourceTree = "<group>"; };
+		600BD03E36121532166372D4 /* CameraCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureView.swift; sourceTree = "<group>"; };
+		63A12282A1F665039788BEE3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PlantTalkBLE.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantBluetoothManager.swift; sourceTree = "<group>"; };
+		7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeAudioIO.swift; sourceTree = "<group>"; };
+		7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIConfiguration.swift; sourceTree = "<group>"; };
+		86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekToolIntegrationTests.swift; sourceTree = "<group>"; };
+		8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClient.swift; sourceTree = "<group>"; };
+		8E797336EB08ACECAC15137F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantTalkBLEApp.swift; sourceTree = "<group>"; };
+		A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeConversation.swift; sourceTree = "<group>"; };
+		AFB78923A16E617E7CFEE47A /* TextConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextConversationView.swift; sourceTree = "<group>"; };
+		B6EC131A2D56E78478954626 /* SensorChartSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorChartSheet.swift; sourceTree = "<group>"; };
+		B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDataTools.swift; sourceTree = "<group>"; };
+		BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListView.swift; sourceTree = "<group>"; };
+		BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantConversationBinding.swift; sourceTree = "<group>"; };
+		BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
+		BD65044E8B2807768E4A838D /* PlantTalkBLETests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PlantTalkBLETests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantConversationBindingTests.swift; sourceTree = "<group>"; };
+		C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryOverviewView.swift; sourceTree = "<group>"; };
+		C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "gpt-live-image-interaction.wav"; sourceTree = "<group>"; };
+		D6237A24CE1893E70859F6D7 /* PlantReading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantReading.swift; sourceTree = "<group>"; };
+		DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocolTests.swift; sourceTree = "<group>"; };
+		F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DayDetailView.swift; sourceTree = "<group>"; };
+		F48D7300B5B0307794AED6BE /* AISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsView.swift; sourceTree = "<group>"; };
+		F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimationDemoView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		12B736AE3CAEB447928F6C38 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				519E46F640471AFB255D3BD9 /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		30C2000207D7393B0B4C4455 /* PlantTalkBLE */ = {
+			isa = PBXGroup;
+			children = (
+				7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */,
+				F48D7300B5B0307794AED6BE /* AISettingsView.swift */,
+				F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */,
+				600BD03E36121532166372D4 /* CameraCaptureView.swift */,
+				BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */,
+				63A12282A1F665039788BEE3 /* ContentView.swift */,
+				BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */,
+				F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */,
+				4EEFF091310D4BDE120ECE51 /* DetailView.swift */,
+				C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */,
+				14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */,
+				8E797336EB08ACECAC15137F /* Info.plist */,
+				8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */,
+				0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */,
+				724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */,
+				BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */,
+				05099F394FC182A10A30211A /* PlantDatabase.swift */,
+				B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */,
+				D6237A24CE1893E70859F6D7 /* PlantReading.swift */,
+				917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */,
+				A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */,
+				7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */,
+				3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */,
+				06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */,
+				B6EC131A2D56E78478954626 /* SensorChartSheet.swift */,
+				AFB78923A16E617E7CFEE47A /* TextConversationView.swift */,
+				DFC320A670A990AF4D6F8F0F /* PreviewAudio */,
+			);
+			path = PlantTalkBLE;
+			sourceTree = "<group>";
+		};
+		B4BFB5D068D8933155DFA36B = {
+			isa = PBXGroup;
+			children = (
+				30C2000207D7393B0B4C4455 /* PlantTalkBLE */,
+				BD43BFC9697BDEA6A1ACC852 /* PlantTalkBLETests */,
+				E8F0FE74304B88910BEFB73B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BD43BFC9697BDEA6A1ACC852 /* PlantTalkBLETests */ = {
+			isa = PBXGroup;
+			children = (
+				86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */,
+				DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */,
+				230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */,
+				5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */,
+				BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */,
+				0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */,
+				1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */,
+			);
+			path = PlantTalkBLETests;
+			sourceTree = "<group>";
+		};
+		DFC320A670A990AF4D6F8F0F /* PreviewAudio */ = {
+			isa = PBXGroup;
+			children = (
+				C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */,
+			);
+			path = PreviewAudio;
+			sourceTree = "<group>";
+		};
+		E8F0FE74304B88910BEFB73B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */,
+				BD65044E8B2807768E4A838D /* PlantTalkBLETests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		742B46E52623C1067DF1332E /* PlantTalkBLE */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 602BB97DC9391FF1B6949314 /* Build configuration list for PBXNativeTarget "PlantTalkBLE" */;
+			buildPhases = (
+				02AB1F930CB9DA3A7E9EB3C5 /* Sources */,
+				C90BE1FDAEE76BD60171DE61 /* Resources */,
+				12B736AE3CAEB447928F6C38 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PlantTalkBLE;
+			packageProductDependencies = (
+				B9338983599653E0F6876F35 /* GRDB */,
+			);
+			productName = PlantTalkBLE;
+			productReference = 6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E975ED3DDCA379F8E4588018 /* PlantTalkBLETests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 86CF2782B7F62678F1673488 /* Build configuration list for PBXNativeTarget "PlantTalkBLETests" */;
+			buildPhases = (
+				3552406E723DB8357615A398 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6C32E5C45012C8494747A537 /* PBXTargetDependency */,
+			);
+			name = PlantTalkBLETests;
+			packageProductDependencies = (
+			);
+			productName = PlantTalkBLETests;
+			productReference = BD65044E8B2807768E4A838D /* PlantTalkBLETests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		994FC882B3AAAF30FDAD85BA /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					742B46E52623C1067DF1332E = {
+						ProvisioningStyle = Automatic;
+					};
+					E975ED3DDCA379F8E4588018 = {
+						DevelopmentTeam = "";
+					};
+				};
+			};
+			buildConfigurationList = 8ABB733A89322B05426F0AF2 /* Build configuration list for PBXProject "PlantTalkBLE" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B4BFB5D068D8933155DFA36B;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A9719559F1007BB435517435 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E8F0FE74304B88910BEFB73B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				742B46E52623C1067DF1332E /* PlantTalkBLE */,
+				E975ED3DDCA379F8E4588018 /* PlantTalkBLETests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C90BE1FDAEE76BD60171DE61 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		02AB1F930CB9DA3A7E9EB3C5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EDCE489BC5ABA6899AEBC3D6 /* AIConfiguration.swift in Sources */,
+				AA45D0AF5CBD31EE42D36021 /* AISettingsView.swift in Sources */,
+				B373EA7C0E6646A0AC86D57A /* AnimationDemoView.swift in Sources */,
+				2276E7EBC1FE747D071C6414 /* CameraCaptureView.swift in Sources */,
+				A98AE3F049FF7DF91F9186D3 /* ChatModels.swift in Sources */,
+				624FE57C9547F99D53D401F5 /* ContentView.swift in Sources */,
+				11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */,
+				728BB87E8B19F0BFF6535A85 /* DayDetailView.swift in Sources */,
+				808EC7CEA736C9B0C18E8E57 /* DetailView.swift in Sources */,
+				1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */,
+				7E12548C2451BB279E1246B9 /* HistoryTransferProtocol.swift in Sources */,
+				D9359F9D5D564D1A7B3E19B0 /* OpenAICompatibleClient.swift in Sources */,
+				0D46B81E925EC66430B5892E /* PlantArtworkView.swift in Sources */,
+				76A30422EC98C370886FB859 /* PlantBluetoothManager.swift in Sources */,
+				DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */,
+				753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */,
+				97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */,
+				2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */,
+				EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */,
+				D38300DF3DB8C01960656B0D /* QwenRealtimeConversation.swift in Sources */,
+				1AD5193889E6E935D13C3336 /* RealtimeAudioIO.swift in Sources */,
+				7B5D40C2BEEC751E7288F985 /* RealtimeConversationHistoryView.swift in Sources */,
+				1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */,
+				2F526B588BA296AB751A2BBC /* SensorChartSheet.swift in Sources */,
+				DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		3552406E723DB8357615A398 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */,
+				BC7182B5EDC20C1864582396 /* HistoryTransferProtocolTests.swift in Sources */,
+				527F5A12260177CF1C616599 /* OpenAICompatibleClientTests.swift in Sources */,
+				C73A929F85876992944F91A3 /* PlantArtworkCropTests.swift in Sources */,
+				4394C6727D115B590FF2A08E /* PlantConversationBindingTests.swift in Sources */,
+				C756635B10D1D60457FCCBEA /* PlantDatabaseTests.swift in Sources */,
+				4F93921AB701B38ADC890BA3 /* QwenRealtimeProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6C32E5C45012C8494747A537 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 742B46E52623C1067DF1332E /* PlantTalkBLE */;
+			targetProxy = 86BB62DC7739A9759C543C40 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1FE034FE3961B95A66524396 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PlantTalkBLETests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlantTalkBLE.app/PlantTalkBLE";
+			};
+			name = Debug;
+		};
+		778EE35AC042DC2AABAF9549 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = PlantTalkBLE/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PlantTalkBLE;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		7C2E4169A05FC34384D80A56 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A65F2919BC7E5944D2473448 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AD9C675FAFE16D57C1F18EC8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = PlantTalkBLE/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PlantTalkBLE;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		E70CD6A532BB591F58B1E6E5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PlantTalkBLETests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlantTalkBLE.app/PlantTalkBLE";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		602BB97DC9391FF1B6949314 /* Build configuration list for PBXNativeTarget "PlantTalkBLE" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				778EE35AC042DC2AABAF9549 /* Debug */,
+				AD9C675FAFE16D57C1F18EC8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		86CF2782B7F62678F1673488 /* Build configuration list for PBXNativeTarget "PlantTalkBLETests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1FE034FE3961B95A66524396 /* Debug */,
+				E70CD6A532BB591F58B1E6E5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8ABB733A89322B05426F0AF2 /* Build configuration list for PBXProject "PlantTalkBLE" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A65F2919BC7E5944D2473448 /* Debug */,
+				7C2E4169A05FC34384D80A56 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A9719559F1007BB435517435 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B9338983599653E0F6876F35 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A9719559F1007BB435517435 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 994FC882B3AAAF30FDAD85BA /* Project object */;
+}
