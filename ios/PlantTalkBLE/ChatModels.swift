@@ -29,11 +29,22 @@ struct ToolInvocation: Identifiable, Codable, Equatable, Sendable {
     let executedAt: Date
 }
 
+struct ChatImageAttachment: Identifiable, Equatable, Sendable {
+    let id: String
+    let mimeType: String
+    let data: Data
+
+    var dataURL: String {
+        "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
+}
+
 struct ChatMessage: Identifiable, Equatable, Sendable {
     let id: UUID
     let conversationID: UUID
     let role: ChatRole
     var content: String
     let createdAt: Date
+    var imageAttachments: [ChatImageAttachment] = []
     var toolInvocations: [ToolInvocation] = []
 }

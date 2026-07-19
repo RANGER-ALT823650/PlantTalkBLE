@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct RealtimeConversationHistoryView: View {
     let database: PlantDatabase
+    let onContinueConversation: (AIConversation, [ChatMessage]) -> Void
 
     @State private var conversations: [AIConversation] = []
     @State private var isLoading = true
@@ -25,7 +26,8 @@ struct RealtimeConversationHistoryView: View {
                         NavigationLink {
                             RealtimeTranscriptHistoryView(
                                 database: database,
-                                conversation: conversation
+                                conversation: conversation,
+                                onContinueConversation: onContinueConversation
                             )
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
@@ -121,6 +123,7 @@ struct RealtimeConversationHistoryView: View {
 private struct RealtimeTranscriptHistoryView: View {
     let database: PlantDatabase
     let conversation: AIConversation
+    let onContinueConversation: (AIConversation, [ChatMessage]) -> Void
 
     @State private var messages: [ChatMessage] = []
     @State private var isLoading = true
@@ -152,6 +155,16 @@ private struct RealtimeTranscriptHistoryView: View {
         }
         .navigationTitle(conversation.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    onContinueConversation(conversation, messages)
+                } label: {
+                    Label("继续语音对话", systemImage: "waveform.badge.mic")
+                }
+                .disabled(isLoading || messages.isEmpty)
+            }
+        }
         .task {
             await loadMessages()
         }

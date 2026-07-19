@@ -3,6 +3,70 @@ import XCTest
 @testable import PlantTalkBLE
 
 final class OpenAICompatibleClientTests: XCTestCase {
+    func testEncodesImageMessageAsMultimodalContentParts() throws {
+        let message = AIRequestMessage(
+            role: .user,
+            content: "这株植物怎么了？",
+            imageDataURLs: ["data:image/jpeg;base64,AQID"]
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(message))
+                as? [String: Any]
+        )
+        XCTAssertEqual(object["role"] as? String, "user")
+        let parts = try XCTUnwrap(object["content"] as? [[String: Any]])
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertEqual(parts[0]["type"] as? String, "text")
+        XCTAssertEqual(parts[0]["text"] as? String, "这株植物怎么了？")
+        XCTAssertEqual(parts[1]["type"] as? String, "image_url")
+        let imageURL = try XCTUnwrap(parts[1]["image_url"] as? [String: Any])
+        XCTAssertEqual(imageURL["url"] as? String, "data:image/jpeg;base64,AQID")
+        XCTAssertEqual(imageURL["detail"] as? String, "auto")
+    }
+
+    func testEncodesImageOnlyMessageWithoutEmptyTextPart() throws {
+        let message = AIRequestMessage(
+            role: .user,
+            content: "",
+            imageDataURLs: ["data:image/jpeg;base64,AQID"]
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(message))
+                as? [String: Any]
+        )
+        let parts = try XCTUnwrap(object["content"] as? [[String: Any]])
+        XCTAssertEqual(parts.count, 1)
+        XCTAssertEqual(parts[0]["type"] as? String, "image_url")
+    }
+
+    func testRecognizesServerRejectionOfImageInput() {
+        XCTAssertTrue(OpenAICompatibleClient.indicatesUnsupportedImageInput(
+            statusCode: 400,
+            message: "This model does not support image input."
+        ))
+        XCTAssertTrue(OpenAICompatibleClient.indicatesUnsupportedImageInput(
+            statusCode: 422,
+            message: "当前模型不支持图片输入"
+        ))
+    }
+
+    func testDoesNotMisclassifyUnrelatedServerErrorsAsImageCapabilityErrors() {
+        XCTAssertFalse(OpenAICompatibleClient.indicatesUnsupportedImageInput(
+            statusCode: 401,
+            message: "This model does not support image input."
+        ))
+        XCTAssertFalse(OpenAICompatibleClient.indicatesUnsupportedImageInput(
+            statusCode: 400,
+            message: "Invalid tool schema."
+        ))
+        XCTAssertFalse(OpenAICompatibleClient.indicatesUnsupportedImageInput(
+            statusCode: 400,
+            message: "Image payload is too large."
+        ))
+    }
+
     func testBuildsChatCompletionsURLFromVersionedBaseURL() throws {
         let baseURL = try XCTUnwrap(URL(string: "https://example.com/v1"))
         XCTAssertEqual(

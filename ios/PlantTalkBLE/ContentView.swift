@@ -6,12 +6,29 @@ let messageFlightCoordinateSpace = "plant-talk-message-flight"
 struct MessageFlightRequest: Equatable {
     let id: UUID
     let text: String
+    let imageAttachments: [ChatImageAttachment]
     let createdAt: Date
     let sourceFrame: CGRect
     let showsOverlayWhilePreparing: Bool
+
+    init(
+        id: UUID,
+        text: String,
+        imageAttachments: [ChatImageAttachment] = [],
+        createdAt: Date,
+        sourceFrame: CGRect,
+        showsOverlayWhilePreparing: Bool
+    ) {
+        self.id = id
+        self.text = text
+        self.imageAttachments = imageAttachments
+        self.createdAt = createdAt
+        self.sourceFrame = sourceFrame
+        self.showsOverlayWhilePreparing = showsOverlayWhilePreparing
+    }
 }
 
-private struct ActiveMessageFlight: Equatable {
+struct ActiveMessageFlight: Equatable {
     let request: MessageFlightRequest
     var currentFrame: CGRect
     var progress: CGFloat = 0
@@ -71,6 +88,7 @@ struct ContentView: View {
     let bluetooth: PlantBluetoothManager
     let database: PlantDatabase
     let aiClient: OpenAICompatibleClient
+    let memoryStore: PlantMemoryStore
     let plantBindingResolver: PlantConversationBindingResolver
 
     @State private var realtimeConversation: QwenRealtimeConversation
@@ -78,6 +96,7 @@ struct ContentView: View {
     @State private var isHistoryOverviewPresented = false
     @State private var isPlantDetailsExpanded = false
     @State private var activeTextChat: TextChatLaunch?
+    @State private var isTextConversationPresented = false
     @State private var isInitialTextChatTransitionComplete = false
     @State private var activeMessageFlight: ActiveMessageFlight?
     @State private var startedMessageFlightID: UUID?
@@ -93,11 +112,13 @@ struct ContentView: View {
     init(
         bluetooth: PlantBluetoothManager,
         database: PlantDatabase,
-        aiClient: OpenAICompatibleClient
+        aiClient: OpenAICompatibleClient,
+        memoryStore: PlantMemoryStore
     ) {
         self.bluetooth = bluetooth
         self.database = database
         self.aiClient = aiClient
+        self.memoryStore = memoryStore
         let plantBindingResolver = PlantConversationBindingResolver(
             database: database,
             currentDeviceIDProvider: { bluetooth.currentOrLastKnownDeviceID }
@@ -108,7 +129,8 @@ struct ContentView: View {
             initialValue: QwenRealtimeConversation(
                 database: database,
                 bluetooth: bluetooth,
-                plantBindingResolver: plantBindingResolver
+                plantBindingResolver: plantBindingResolver,
+                memoryStore: memoryStore
             )
         )
     }
@@ -140,12 +162,16 @@ struct ContentView: View {
                         isRealtimeTranscriptPresented = true
                     }
                 }
-                .simultaneousGesture(showHistoryGesture)
+                .simultaneousGesture(horizontalPageGesture)
             }
 
             if isHistoryOverviewPresented {
                 NavigationStack {
-                    HistoryOverviewView(database: database)
+                    HistoryOverviewView(
+                        database: database,
+                        onContinueTextConversation: continueTextConversation,
+                        onContinueRealtimeConversation: continueRealtimeConversation
+                    )
                         .background(Color(uiColor: .systemBackground))
                         .toolbar {
                             ToolbarItem(placement: .topBarTrailing) {
@@ -169,30 +195,8 @@ struct ContentView: View {
     }
 
     private var screenLayers: some View {
-        ZStack {
-            if let activeTextChat,
-               let plantBinding = activeTextChat.plantBinding {
-                TextConversationView(
-                    database: database,
-                    client: aiClient,
-                    toolExecutor: PlantDataToolExecutor(
-                        database: database,
-                        bluetooth: bluetooth,
-                        boundDeviceID: plantBinding.deviceID
-                    ),
-                    plantBinding: plantBinding,
-                    initialMessage: activeTextChat.message,
-                    initialMessageID: activeTextChat.id,
-                    initialMessageDate: activeTextChat.createdAt,
-                    isInitialTransitionComplete: isInitialTextChatTransitionComplete,
-                    completedMessageFlightID: completedMessageFlightID,
-                    startedMessageFlightID: startedMessageFlightID,
-                    onMessageFlightRequested: beginMessageFlight,
-                    onMessageFlightCancelled: cancelMessageFlight,
-                    onHome: returnToHome
-                )
-                .zIndex(0)
-            } else {
+        GeometryReader { geometry in
+            ZStack {
                 HomeDashboard(
                     reading: bluetooth.reading,
                     database: database,
@@ -205,30 +209,70 @@ struct ContentView: View {
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
                 .zIndex(1)
+                .allowsHitTesting(!isTextConversationPresented)
+                .toolbar(.visible, for: .navigationBar)
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button(action: showHistoryOverview) {
-                            Image(systemName: "clock.arrow.circlepath")
+                    if !isTextConversationPresented {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: showHistoryOverview) {
+                                Image(systemName: "clock.arrow.circlepath")
+                            }
+                            .accessibilityLabel("查看历史记录")
                         }
-                        .accessibilityLabel("查看历史记录")
-                    }
 
-                    ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button(action: toggleBluetoothConnection) {
-                            Image(systemName: bluetoothSymbol)
-                                .foregroundStyle(bluetooth.state == .connected ? .green : .primary)
-                        }
-                        .disabled(bluetoothConnectionUnavailable)
-                        .accessibilityLabel(bluetooth.state == .connected ? "断开蓝牙" : "连接蓝牙")
-                        .accessibilityValue(bluetooth.state.title)
+                        ToolbarItemGroup(placement: .topBarTrailing) {
+                            Button(action: toggleBluetoothConnection) {
+                                Image(systemName: bluetoothSymbol)
+                                    .foregroundStyle(bluetooth.state == .connected ? .green : .primary)
+                            }
+                            .disabled(bluetoothConnectionUnavailable)
+                            .accessibilityLabel(bluetooth.state == .connected ? "断开蓝牙" : "连接蓝牙")
+                            .accessibilityValue(bluetooth.state.title)
 
-                        NavigationLink {
-                            AppSettingsView(database: database)
-                        } label: {
-                            Image(systemName: "gearshape")
+                            NavigationLink {
+                                AppSettingsView(
+                                    database: database,
+                                    memoryStore: memoryStore
+                                )
+                            } label: {
+                                Image(systemName: "gearshape")
+                            }
+                            .accessibilityLabel("设置")
                         }
-                        .accessibilityLabel("设置")
                     }
+                }
+
+                if let activeTextChat,
+                   let plantBinding = activeTextChat.plantBinding {
+                    TextConversationView(
+                        database: database,
+                        client: aiClient,
+                        memoryStore: memoryStore,
+                        toolExecutor: PlantDataToolExecutor(
+                            database: database,
+                            bluetooth: bluetooth,
+                            boundDeviceID: plantBinding.deviceID
+                        ),
+                        plantBinding: plantBinding,
+                        initialMessage: activeTextChat.message,
+                        initialMessageID: activeTextChat.id,
+                        initialMessageDate: activeTextChat.createdAt,
+                        resumedConversation: activeTextChat.conversation,
+                        resumedMessages: activeTextChat.messages,
+                        isPagePresented: isTextConversationPresented,
+                        isInitialTransitionComplete: activeTextChat.isResumed
+                            || isInitialTextChatTransitionComplete,
+                        completedMessageFlightID: completedMessageFlightID,
+                        startedMessageFlightID: startedMessageFlightID,
+                        onMessageFlightRequested: beginMessageFlight,
+                        onMessageFlightCancelled: cancelMessageFlight,
+                        onHome: returnToHome
+                    )
+                    .id(activeTextChat.id)
+                    .offset(x: isTextConversationPresented ? 0 : geometry.size.width)
+                    .allowsHitTesting(isTextConversationPresented)
+                    .accessibilityHidden(!isTextConversationPresented)
+                    .zIndex(2)
                 }
             }
         }
@@ -248,14 +292,23 @@ struct ContentView: View {
         )
     }
 
-    private var showHistoryGesture: some Gesture {
+    private var horizontalPageGesture: some Gesture {
         DragGesture(minimumDistance: 24)
             .onEnded { value in
-                guard activeTextChat == nil,
-                      !isHistoryOverviewPresented,
-                      isHorizontalSwipe(value.translation),
-                      value.translation.width > 70 else { return }
-                showHistoryOverview()
+                guard !isHistoryOverviewPresented,
+                      isHorizontalSwipe(value.translation) else { return }
+
+                if isTextConversationPresented,
+                   value.translation.width > 70 {
+                    returnToHome()
+                } else if !isTextConversationPresented,
+                          value.translation.width > 70 {
+                    showHistoryOverview()
+                } else if !isTextConversationPresented,
+                          value.translation.width < -70,
+                          activeTextChat != nil {
+                    showTextConversation()
+                }
             }
     }
 
@@ -349,20 +402,83 @@ struct ContentView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             activeTextChat = launch
+            isTextConversationPresented = true
         }
     }
 
     private func returnToHome() {
         messageFlightDestinationValidationTask?.cancel()
         messageFlightDestinationValidationTask = nil
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            activeTextChat = nil
-            isInitialTextChatTransitionComplete = false
+        withAnimation(pageTransitionAnimation) {
+            isTextConversationPresented = false
+        }
+        var cleanupTransaction = Transaction(animation: nil)
+        cleanupTransaction.disablesAnimations = true
+        withTransaction(cleanupTransaction) {
             activeMessageFlight = nil
             startedMessageFlightID = nil
             completedMessageFlightID = nil
+        }
+    }
+
+    private func showTextConversation() {
+        isHomeTextComposerFocused = false
+        withAnimation(pageTransitionAnimation) {
+            isTextConversationPresented = true
+        }
+    }
+
+    private var pageTransitionAnimation: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)
+    }
+
+    private func continueTextConversation(
+        _ conversation: AIConversation,
+        messages: [ChatMessage]
+    ) {
+        Task { @MainActor in
+            do {
+                let plantBinding = try await plantBindingResolver.bindCurrentPlant()
+                guard !Task.isCancelled else { return }
+                let launch = TextChatLaunch(
+                    resuming: conversation,
+                    messages: messages,
+                    plantBinding: plantBinding
+                )
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    activeTextChat = launch
+                    isInitialTextChatTransitionComplete = true
+                }
+                withAnimation(pageTransitionAnimation) {
+                    isHistoryOverviewPresented = false
+                    isTextConversationPresented = true
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                textChatStartError = error.localizedDescription
+                isTextChatStartErrorPresented = true
+            }
+        }
+    }
+
+    private func continueRealtimeConversation(
+        _ conversation: AIConversation,
+        messages: [ChatMessage]
+    ) {
+        withAnimation(pageTransitionAnimation) {
+            isHistoryOverviewPresented = false
+        }
+        isRealtimeTranscriptPresented = true
+        Task {
+            if realtimeConversation.state.isActive {
+                realtimeConversation.stop()
+            }
+            await realtimeConversation.start(
+                resuming: conversation,
+                messages: messages
+            )
         }
     }
 
@@ -522,6 +638,10 @@ private struct TextChatLaunch: Identifiable, Equatable {
     let createdAt: Date
     let sourceFrame: CGRect
     let plantBinding: PlantConversationBinding?
+    let conversation: AIConversation?
+    let messages: [ChatMessage]
+
+    var isResumed: Bool { conversation != nil }
 
     init(message: String, sourceFrame: CGRect) {
         id = UUID()
@@ -529,6 +649,8 @@ private struct TextChatLaunch: Identifiable, Equatable {
         createdAt = Date()
         self.sourceFrame = sourceFrame
         plantBinding = nil
+        conversation = nil
+        messages = []
     }
 
     private init(
@@ -536,13 +658,31 @@ private struct TextChatLaunch: Identifiable, Equatable {
         message: String,
         createdAt: Date,
         sourceFrame: CGRect,
-        plantBinding: PlantConversationBinding
+        plantBinding: PlantConversationBinding,
+        conversation: AIConversation?,
+        messages: [ChatMessage]
     ) {
         self.id = id
         self.message = message
         self.createdAt = createdAt
         self.sourceFrame = sourceFrame
         self.plantBinding = plantBinding
+        self.conversation = conversation
+        self.messages = messages
+    }
+
+    init(
+        resuming conversation: AIConversation,
+        messages: [ChatMessage],
+        plantBinding: PlantConversationBinding
+    ) {
+        id = conversation.id
+        message = ""
+        createdAt = conversation.createdAt
+        sourceFrame = .zero
+        self.plantBinding = plantBinding
+        self.conversation = conversation
+        self.messages = messages
     }
 
     func bound(to plantBinding: PlantConversationBinding) -> TextChatLaunch {
@@ -551,7 +691,9 @@ private struct TextChatLaunch: Identifiable, Equatable {
             message: message,
             createdAt: createdAt,
             sourceFrame: sourceFrame,
-            plantBinding: plantBinding
+            plantBinding: plantBinding,
+            conversation: conversation,
+            messages: messages
         )
     }
 }
@@ -795,18 +937,17 @@ private struct HomeTextComposer: View {
     }
 }
 
-private struct MessageFlightOverlay: View {
+struct MessageFlightOverlay: View {
     let flight: ActiveMessageFlight
 
     var body: some View {
         let frame = flight.currentFrame
         let shape = MessageFlightBubbleShape()
 
-        Text(flight.request.text)
-            .foregroundStyle(.primary)
-            .lineLimit(5)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
+        MessageFlightPayload(
+            text: flight.request.text,
+            imageAttachments: flight.request.imageAttachments
+        )
             .padding(.leading, 18 - 4 * flight.progress)
             .padding(.trailing, 18 + 2 * flight.progress)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)

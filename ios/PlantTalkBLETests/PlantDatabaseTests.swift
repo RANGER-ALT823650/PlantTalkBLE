@@ -1,8 +1,234 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import PlantTalkBLE
 
 final class PlantDatabaseTests: XCTestCase {
+    func testMemorySequenceReadsTextAndRealtimeWithoutRepeating() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let textConversation = try await database.createConversation(
+            title: "文字",
+            kind: .text
+        )
+        let realtimeConversation = try await database.createConversation(
+            title: "语音",
+            kind: .realtime
+        )
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: textConversation.id,
+            role: .user,
+            content: "我喜欢简洁回答",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        ))
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: realtimeConversation.id,
+            role: .user,
+            content: "这株植物叫小绿",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_001)
+        ))
+
+        let firstBatch = try await database.memoryHistoryMessages(
+            afterSequence: 0,
+            limit: 1
+        )
+        let first = try XCTUnwrap(firstBatch.first)
+        let secondBatch = try await database.memoryHistoryMessages(
+            afterSequence: first.sequence,
+            limit: 10
+        )
+
+        XCTAssertEqual(firstBatch.count, 1)
+        XCTAssertEqual(first.conversationKind, .text)
+        XCTAssertEqual(first.content, "我喜欢简洁回答")
+        XCTAssertEqual(secondBatch.map(\.conversationKind), [.realtime])
+        XCTAssertEqual(secondBatch.map(\.content), ["这株植物叫小绿"])
+        XCTAssertTrue(secondBatch.allSatisfy { $0.sequence > first.sequence })
+    }
+
+    func testMemorySequenceDoesNotReuseAfterDeletingNewestConversation() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let deletedConversation = try await database.createConversation(title: "将删除")
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: deletedConversation.id,
+            role: .user,
+            content: "已经整理的内容",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        ))
+        let initialHistory = try await database.memoryHistoryMessages(
+            afterSequence: 0,
+            limit: 10
+        )
+        let processed = try XCTUnwrap(initialHistory.last)
+
+        try await database.deleteConversation(id: deletedConversation.id)
+        let newConversation = try await database.createConversation(title: "新会话")
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: newConversation.id,
+            role: .user,
+            content: "删除会话后的新内容",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_001)
+        ))
+
+        let newHistory = try await database.memoryHistoryMessages(
+            afterSequence: processed.sequence,
+            limit: 10
+        )
+
+        XCTAssertEqual(newHistory.map(\.content), ["删除会话后的新内容"])
+        XCTAssertTrue(newHistory.allSatisfy { $0.sequence > processed.sequence })
+    }
+
+    func testLegacyMemoryCursorConvertsAfterItsHighestMessageWasDeleted() async throws {
+        let database = try PlantDatabase(path: legacyDatabasePathWithDeletedHighWaterMessage())
+        let converted = try await database.memorySequence(forLegacyRowID: 2)
+        let newConversation = try await database.createConversation(title: "新会话")
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: newConversation.id,
+            role: .user,
+            content: "迁移后的新消息",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_002)
+        ))
+
+        let newHistory = try await database.memoryHistoryMessages(
+            afterSequence: converted,
+            limit: 10
+        )
+
+        XCTAssertEqual(converted, 1)
+        XCTAssertEqual(newHistory.map(\.content), ["迁移后的新消息"])
+    }
+
+    func testMemoryStoreKeepsOneFileAndTracksManualUpdateTime() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = directory.appendingPathComponent("plant-memory.json")
+        let store = PlantMemoryStore(fileURL: fileURL)
+        let id = UUID()
+        let originalDate = Date(timeIntervalSince1970: 1_750_000_000)
+        let updatedDate = originalDate.addingTimeInterval(300)
+        var document = PlantMemoryDocument()
+        document.userProfile = [PlantMemoryRecord(
+            id: id,
+            content: "用户喜欢简洁回答",
+            updatedAt: originalDate
+        )]
+        try await store.replace(with: document)
+
+        let updated = try await store.update(
+            section: .userProfile,
+            recordID: id,
+            content: "用户希望回答先给结论",
+            now: updatedDate
+        )
+        let loaded = try await store.load()
+        let prompt = try await store.promptContext()
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+
+        XCTAssertEqual(files.map(\.lastPathComponent), ["plant-memory.json"])
+        XCTAssertEqual(updated.updatedAt, updatedDate)
+        XCTAssertEqual(loaded.userProfile, [updated])
+        XCTAssertTrue(prompt.contains("## 用户画像"))
+        XCTAssertTrue(prompt.contains("用户希望回答先给结论"))
+        XCTAssertTrue(prompt.contains("更新于"))
+    }
+
+    func testMemoryStorePreservesLegacyCursorUntilDatabaseConversion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let fileURL = directory.appendingPathComponent("plant-memory.json")
+        let legacyJSON = """
+            {
+              "schema_version": 1,
+              "last_processed_message_row_id": 42,
+              "user_profile": [],
+              "plant_profile": [],
+              "important_events": [],
+              "follow_ups": []
+            }
+            """
+        try Data(legacyJSON.utf8).write(to: fileURL)
+        let store = PlantMemoryStore(fileURL: fileURL)
+
+        var document = try await store.load()
+
+        XCTAssertEqual(document.schemaVersion, 1)
+        XCTAssertEqual(document.lastProcessedMessageSequence, 42)
+
+        document.schemaVersion = PlantMemoryDocument.currentSchemaVersion
+        try await store.replace(with: document)
+        let upgradedJSON = try String(contentsOf: fileURL, encoding: .utf8)
+        XCTAssertTrue(upgradedJSON.contains("last_processed_message_sequence"))
+        XCTAssertFalse(upgradedJSON.contains("last_processed_message_row_id"))
+    }
+
+    func testMemoryReconciliationAddsUpdatesDeletesAndDeduplicates() {
+        let oldDate = Date(timeIntervalSince1970: 1_750_000_000)
+        let now = oldDate.addingTimeInterval(600)
+        let userID = UUID()
+        let plantID = UUID()
+        var current = PlantMemoryDocument()
+        current.lastProcessedMessageSequence = 42
+        current.userProfile = [PlantMemoryRecord(
+            id: userID,
+            content: "用户喜欢简洁回答",
+            updatedAt: oldDate
+        )]
+        current.plantProfile = [PlantMemoryRecord(
+            id: plantID,
+            content: "植物叫小绿",
+            updatedAt: oldDate
+        )]
+        current.importantEvents = [PlantMemoryRecord(
+            id: UUID(),
+            content: "已经过时的临时事件",
+            updatedAt: oldDate
+        )]
+
+        let proposal = MemoryOrganizationProposal(
+            userProfile: [MemoryOrganizationCandidate(
+                id: userID.uuidString,
+                content: "用户希望回答先给结论"
+            )],
+            plantProfile: [MemoryOrganizationCandidate(
+                id: nil,
+                content: "植物叫小绿"
+            )],
+            importantEvents: [],
+            followUps: [
+                MemoryOrganizationCandidate(id: nil, content: "三天后检查叶片"),
+                MemoryOrganizationCandidate(id: nil, content: "  三天后检查叶片  ")
+            ]
+        )
+
+        let result = PlantMemoryLaunchOrganizer.reconcile(
+            current: current,
+            proposal: proposal,
+            now: now
+        )
+
+        XCTAssertEqual(result.lastProcessedMessageSequence, 42)
+        XCTAssertEqual(result.userProfile.first?.id, userID)
+        XCTAssertEqual(result.userProfile.first?.content, "用户希望回答先给结论")
+        XCTAssertEqual(result.userProfile.first?.updatedAt, now)
+        XCTAssertEqual(result.plantProfile.first?.id, plantID)
+        XCTAssertEqual(result.plantProfile.first?.updatedAt, oldDate)
+        XCTAssertTrue(result.importantEvents.isEmpty)
+        XCTAssertEqual(result.followUps.map(\.content), ["三天后检查叶片"])
+        XCTAssertEqual(result.followUps.first?.updatedAt, now)
+    }
+
     func testConversationAndMessagesPersistInOrder() async throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".sqlite")
@@ -20,13 +246,19 @@ final class PlantDatabaseTests: XCTestCase {
             resultJSON: #"{"temperature":{"average":24.6}}"#,
             executedAt: secondDate
         )
+        let imageAttachment = ChatImageAttachment(
+            id: "persisted-image",
+            mimeType: "image/jpeg",
+            data: Data([0x01, 0x02, 0x03])
+        )
 
         try await database.saveChatMessage(ChatMessage(
             id: UUID(),
             conversationID: conversation.id,
             role: .user,
             content: "现在感觉怎么样？",
-            createdAt: firstDate
+            createdAt: firstDate,
+            imageAttachments: [imageAttachment]
         ))
         try await database.saveChatMessage(ChatMessage(
             id: UUID(),
@@ -45,6 +277,8 @@ final class PlantDatabaseTests: XCTestCase {
         XCTAssertEqual(conversations.first?.updatedAt, secondDate)
         XCTAssertEqual(messages.map(\.role), [.user, .assistant])
         XCTAssertEqual(messages.map(\.content), ["现在感觉怎么样？", "空气湿度目前比较稳定。"])
+        XCTAssertEqual(messages.first?.imageAttachments, [imageAttachment])
+        XCTAssertTrue(messages.last?.imageAttachments.isEmpty == true)
         XCTAssertEqual(messages.last?.toolInvocations, [invocation])
 
         try await database.deleteConversation(id: conversation.id)
@@ -52,6 +286,188 @@ final class PlantDatabaseTests: XCTestCase {
         let remainingMessages = try await database.chatMessages(conversationID: conversation.id)
         XCTAssertTrue(remainingConversations.isEmpty)
         XCTAssertTrue(remainingMessages.isEmpty)
+    }
+
+    func testLegacyDataURLImageSchemaRepairsWithoutLosingHistory() async throws {
+        let path = temporaryDatabasePath()
+        _ = try PlantDatabase(path: path)
+
+        let conversationID = UUID()
+        let legacyMessageID = UUID()
+        let legacyImageData = Data([0x01, 0x02, 0x03, 0x04])
+        let legacyDataURL = "data:image/png;base64,\(legacyImageData.base64EncodedString())"
+        let baseDate = Date(timeIntervalSince1970: 1_750_000_000)
+        let queue = try DatabaseQueue(path: path)
+        try await queue.write { db in
+            try db.execute(sql: "DROP INDEX ai_message_images_message_position")
+            try db.execute(sql: "DROP TABLE ai_message_images")
+            try db.create(table: "ai_message_images") { table in
+                table.column("id", .text).primaryKey()
+                table.column("message_id", .text)
+                    .notNull()
+                    .references("ai_messages", onDelete: .cascade)
+                table.column("position", .integer).notNull()
+                table.column("data_url", .text).notNull()
+                table.uniqueKey(["message_id", "position"])
+            }
+            try db.create(
+                index: "ai_message_images_message_position",
+                on: "ai_message_images",
+                columns: ["message_id", "position"]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_conversations (
+                        id, title, created_at, updated_at, kind
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    conversationID.uuidString,
+                    "旧版图片对话",
+                    baseDate,
+                    baseDate,
+                    AIConversationKind.text.rawValue
+                ]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_messages (
+                        id, conversation_id, role, content, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    legacyMessageID.uuidString,
+                    conversationID.uuidString,
+                    ChatRole.user.rawValue,
+                    "旧版图片",
+                    baseDate
+                ]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_memory_message_sequences (message_id)
+                    VALUES (?)
+                    """,
+                arguments: [legacyMessageID.uuidString]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_message_images (
+                        id, message_id, position, data_url
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                arguments: [
+                    "legacy-image",
+                    legacyMessageID.uuidString,
+                    0,
+                    legacyDataURL
+                ]
+            )
+            try db.execute(
+                sql: """
+                    DELETE FROM grdb_migrations
+                    WHERE identifier = 'repair legacy ai message image storage'
+                    """
+            )
+        }
+
+        let repairedDatabase = try PlantDatabase(path: path)
+        var messages = try await repairedDatabase.chatMessages(
+            conversationID: conversationID
+        )
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.content, "旧版图片")
+        XCTAssertEqual(messages.first?.imageAttachments, [ChatImageAttachment(
+            id: "legacy-image",
+            mimeType: "image/png",
+            data: legacyImageData
+        )])
+
+        let newImage = ChatImageAttachment(
+            id: "new-image",
+            mimeType: "image/jpeg",
+            data: Data([0x05, 0x06, 0x07])
+        )
+        try await repairedDatabase.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: conversationID,
+            role: .user,
+            content: "迁移后的新图片",
+            createdAt: baseDate.addingTimeInterval(1),
+            imageAttachments: [newImage]
+        ))
+
+        messages = try await repairedDatabase.chatMessages(
+            conversationID: conversationID
+        )
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages.last?.imageAttachments, [newImage])
+    }
+
+    private func temporaryDatabasePath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".sqlite")
+            .path
+    }
+
+    private func legacyDatabasePathWithDeletedHighWaterMessage() throws -> String {
+        let path = temporaryDatabasePath()
+        let queue = try DatabaseQueue(path: path)
+        try queue.write { db in
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+            try db.execute(sql: """
+                CREATE TABLE grdb_migrations (
+                    identifier TEXT NOT NULL PRIMARY KEY
+                )
+                """)
+            for identifier in [
+                "create sensor history",
+                "add timestamp quality",
+                "create ai conversations",
+                "classify ai conversations",
+                "store ai tool invocations"
+            ] {
+                try db.execute(
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+                    arguments: [identifier]
+                )
+            }
+            try db.execute(sql: """
+                CREATE TABLE ai_conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'text'
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE ai_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL
+                        REFERENCES ai_conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO ai_conversations (
+                    id, title, created_at, updated_at, kind
+                ) VALUES
+                    ('retained', '保留', 1, 1, 'text'),
+                    ('deleted', '删除', 2, 2, 'text')
+                """)
+            try db.execute(sql: """
+                INSERT INTO ai_messages (
+                    id, conversation_id, role, content, created_at
+                ) VALUES
+                    ('legacy-1', 'retained', 'user', '旧消息一', 1),
+                    ('legacy-2', 'deleted', 'user', '旧消息二', 2)
+                """)
+            try db.execute(sql: "DELETE FROM ai_conversations WHERE id = 'deleted'")
+        }
+        return path
     }
 
     func testConversationsCanBeFilteredByKind() async throws {

@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MeshGradient 控制点可视化</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0b0d14;
+      --surface: #12151f;
+      --surface2: #181b27;
+      --border: rgba(255,255,255,0.07);
+      --text: #e2e4ee;
+      --dim: #6b7280;
+      --muted: #2e3245;
+      --accent: #7c6df5;
+      --corner: #94a3b8;
+      --edge: #38bdf8;
+      --inner: #c084fc;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 28px 20px 48px;
+      gap: 24px;
+      min-height: 100vh;
+    }
+
+    header {
+      text-align: center;
+    }
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #c4b5fd 0%, #7dd3fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 4px;
+    }
+    header p {
+      font-size: 0.75rem;
+      color: var(--dim);
+    }
+
+    .layout {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+      width: 100%;
+      max-width: 940px;
+    }
+
+    /* ─── Canvas ─── */
+    .canvas-wrap {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 20px;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1;
+      border-radius: 10px;
+      background: #07090f;
+    }
+
+    .legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    .leg {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.7rem;
+      color: var(--dim);
+    }
+    .leg-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ─── Controls ─── */
+    .sidebar {
+      width: 250px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .card-title {
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    /* sliders */
+    .sl-row { display: flex; flex-direction: column; gap: 7px; }
+    .sl-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sl-head span { font-size: 0.78rem; font-weight: 500; }
+    .sl-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--accent);
+      background: rgba(124,109,245,0.14);
+      padding: 1px 7px;
+      border-radius: 5px;
+    }
+    .sl-desc { font-size: 0.65rem; color: var(--muted); line-height: 1.5; }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: var(--surface2);
+      border-radius: 3px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 15px; height: 15px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(124,109,245,0.22);
+      cursor: pointer;
+    }
+
+    /* toggles */
+    .tog-list { display: flex; flex-direction: column; gap: 9px; }
+    .tog-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .tog-row label { font-size: 0.78rem; cursor: pointer; user-select: none; }
+
+    .tog { position: relative; width: 32px; height: 17px; }
+    .tog input { opacity: 0; width: 0; height: 0; }
+    .tog-bg {
+      position: absolute; inset: 0;
+      border-radius: 9px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background .2s, border-color .2s;
+    }
+    .tog-bg::after {
+      content: '';
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 11px; height: 11px;
+      border-radius: 50%;
+      background: var(--dim);
+      transition: transform .2s, background .2s;
+    }
+    .tog input:checked + .tog-bg { background: rgba(124,109,245,.3); border-color: var(--accent); }
+    .tog input:checked + .tog-bg::after { transform: translateX(15px); background: var(--accent); }
+
+    /* play button */
+    .btn {
+      width: 100%;
+      padding: 9px;
+      border-radius: 9px;
+      border: 1px solid rgba(124,109,245,.4);
+      background: rgba(124,109,245,.1);
+      color: #c4b5fd;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      transition: background .15s;
+      font-family: inherit;
+    }
+    .btn:hover { background: rgba(124,109,245,.2); }
+
+    /* info */
+    .info-list { display: flex; flex-direction: column; gap: 7px; }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.72rem;
+    }
+    .info-row .k { color: var(--dim); }
+    .info-row .v {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--text);
+    }
+
+    /* tooltip */
+    #tip {
+      position: fixed;
+      background: #1b1e2d;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.7rem;
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1.75;
+      color: var(--text);
+      pointer-events: none;
+      display: none;
+      z-index: 50;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>MeshGradient 控制点可视化</h1>
+  <p>4 × 4 网格 · 16 个顶点 · 实时运动</p>
+</header>
+
+<div class="layout">
+
+  <!-- Canvas -->
+  <div class="canvas-wrap">
+    <canvas id="c" width="540" height="540"></canvas>
+    <div class="legend">
+      <div class="leg"><div class="leg-dot" style="background:var(--corner)"></div>角点 Corner（固定）</div>
+      <div class="leg"><div class="leg-dot" style="background:var(--edge)"></div>边点 Edge（单轴）</div>
+      <div class="leg"><div class="leg-dot" style="background:var(--inner)"></div>内点 Inner（双轴）</div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <div class="card">
+      <div class="card-title">动画参数</div>
+
+      <div class="sl-row">
+        <div class="sl-head"><span>Activity</span><span class="sl-val" id="v-act">0.60</span></div>
+        <input type="range" id="s-act" min="0" max="1" step="0.01" value="0.6">
+        <div class="sl-desc">影响漂移幅度 drift 与动画速度</div>
+      </div>
+
+      <div class="sl-row">
+        <div class="sl-head"><span>速度倍率</span><span class="sl-val" id="v-spd">1.0×</span></div>
+        <input type="range" id="s-spd" min="0.05" max="6" step="0.05" value="1">
+        <div class="sl-desc">全局缩放 phase 增速，可慢放研究</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">显示选项</div>
+      <div class="tog-list">
+        <div class="tog-row"><label for="t-grid">网格连线</label>
+          <label class="tog"><input type="checkbox" id="t-grid" checked><div class="tog-bg"></div></label></div>
+        <div class="tog-row"><label for="t-trail">运动轨迹</label>
+          <label class="tog"><input type="checkbox" id="t-trail"><div class="tog-bg"></div></label></div>
+        <div class="tog-row"><label for="t-label">点编号</label>
+          <label class="tog"><input type="checkbox" id="t-label" checked><div class="tog-bg"></div></label></div>
+        <div class="tog-row"><label for="t-home">基准位置</label>
+          <label class="tog"><input type="checkbox" id="t-home"><div class="tog-bg"></div></label></div>
+        <div class="tog-row"><label for="t-vel">速度矢量</label>
+          <label class="tog"><input type="checkbox" id="t-vel"><div class="tog-bg"></div></label></div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:12px 16px">
+      <button class="btn" id="btn-play">
+        <svg id="ico" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        <span id="btn-lbl">暂停</span>
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">实时数值</div>
+      <div class="info-list">
+        <div class="info-row"><span class="k">time (s)</span><span class="v" id="i-time">0.000</span></div>
+        <div class="info-row"><span class="k">phase</span><span class="v" id="i-phase">0.000</span></div>
+        <div class="info-row"><span class="k">drift</span><span class="v" id="i-drift">0.077</span></div>
+        <div class="info-row"><span class="k">速度系数</span><span class="v" id="i-coeff">0.508</span></div>
+        <div class="info-row"><span class="k">FPS</span><span class="v" id="i-fps">—</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="tip"></div>
+
+<script>
+// ── Canvas setup ──────────────────────────────────────────
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const PAD = 54;
+const S   = W - PAD * 2;   // grid size in px
+
+// ── State ─────────────────────────────────────────────────
+let paused    = false;
+let activity  = 0.6;
+let speedMult = 1.0;
+let showGrid  = true;
+let showTrail = false;
+let showLabel = true;
+let showHome  = false;
+let showVel   = false;
+
+// Timing: use page start so phase is always increasing from a natural offset
+const T0 = performance.now();
+let   pausedAt    = 0;   // performance.now() when paused
+let   pausedTotal = 0;   // total accumulated paused duration (ms)
+
+// FPS
+let lastTs = 0, fpsAcc = 0, fpsCount = 0, dispFPS = '—';
+
+// Trails (ring buffer per point, canvas coords)
+const TRAIL_MAX = 80;
+const trails = Array.from({length:16}, () => []);
+
+// ── Point definitions ──────────────────────────────────────
+// Each entry: { type, bx, by, xFn, xFreq, xAmp, yFn, yFreq, yAmp }
+// xFn/yFn: 's'=sin, 'c'=cos, null=fixed
+// xAmp/yAmp: multiplier on top of drift (inner=1.0, edge=0.4~0.45)
+const DEFS = [
+  // Row 0
+  { type:'corner', bx:0,    by:0, xFn:null },
+  { type:'edge',   bx:0.33, by:0, xFn:'s', xF:0.73, xA:0.45,  yFn:null },
+  { type:'edge',   bx:0.67, by:0, xFn:'c', xF:0.81, xA:0.45,  yFn:null },
+  { type:'corner', bx:1,    by:0, xFn:null },
+  // Row 1
+  { type:'edge',   bx:0, by:0.33, xFn:null,  yFn:'c', yF:0.69, yA:0.4 },
+  { type:'inner',  bx:0.33, by:0.33, xFn:'c', xF:0.91, xA:1, yFn:'s', yF:1.13, yA:1 },
+  { type:'inner',  bx:0.67, by:0.33, xFn:'s', xF:1.19, xA:1, yFn:'c', yF:0.83, yA:1 },
+  { type:'edge',   bx:1, by:0.33, xFn:null,  yFn:'s', yF:0.77, yA:0.4 },
+  // Row 2
+  { type:'edge',   bx:0, by:0.67, xFn:null,  yFn:'s', yF:0.87, yA:0.4 },
+  { type:'inner',  bx:0.33, by:0.67, xFn:'s', xF:0.71, xA:1, yFn:'c', yF:1.07, yA:1 },
+  { type:'inner',  bx:0.67, by:0.67, xFn:'c', xF:0.67, xA:1, yFn:'s', yF:0.89, yA:1 },
+  { type:'edge',   bx:1, by:0.67, xFn:null,  yFn:'c', yF:0.93, yA:0.4 },
+  // Row 3
+  { type:'corner', bx:0,    by:1, xFn:null },
+  { type:'edge',   bx:0.33, by:1, xFn:'c', xF:0.79, xA:0.45, yFn:null },
+  { type:'edge',   bx:0.67, by:1, xFn:'s', xF:0.75, xA:0.45, yFn:null },
+  { type:'corner', bx:1,    by:1, xFn:null },
+];
+
+function trig(fn, v) { return fn === 'c' ? Math.cos(v) : Math.sin(v); }
+
+function calcPoints(phase, drift) {
+  return DEFS.map(d => {
+    let x = d.bx, y = d.by;
+    if (d.xFn) x += trig(d.xFn, phase * d.xF) * drift * d.xA;
+    if (d.yFn) y += trig(d.yFn, phase * d.yF) * drift * d.yA;
+    return { x, y, type: d.type };
+  });
+}
+
+// Normalized → canvas px
+function px(nx) { return PAD + nx * S; }
+function py(ny) { return PAD + ny * S; }
+
+// Color per type
+function col(type) {
+  if (type === 'corner') return '#94a3b8';
+  if (type === 'edge')   return '#38bdf8';
+  return '#c084fc';
+}
+
+// ── Draw ──────────────────────────────────────────────────
+function draw(ts) {
+  // FPS
+  if (lastTs) {
+    fpsAcc   += ts - lastTs;
+    fpsCount += 1;
+    if (fpsAcc >= 600) {
+      dispFPS = Math.round(fpsCount / fpsAcc * 1000);
+      fpsAcc = 0; fpsCount = 0;
+    }
+  }
+  lastTs = ts;
+
+  // Time: how many ms of un-paused time have elapsed?
+  const runMs  = paused
+    ? (pausedAt - T0 - pausedTotal)
+    : (ts       - T0 - pausedTotal);
+  const time   = runMs / 1000;                        // seconds, like Swift's timeIntervalSinceReferenceDate (relative)
+  const coeff  = 0.34 + 0.28 * activity;
+  const phase  = time * coeff * speedMult;
+  const drift  = 0.035 + 0.07 * activity;
+
+  const pts = calcPoints(phase, drift);
+
+  // Update trails (only when running)
+  if (!paused) {
+    pts.forEach((p, i) => {
+      trails[i].push({ x: px(p.x), y: py(p.y) });
+      if (trails[i].length > TRAIL_MAX) trails[i].shift();
+    });
+  }
+
+  // ── Clear ──
+  ctx.clearRect(0, 0, W, H);
+
+  // ── Reference grid (static, faint) ──
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const t = i / 3;
+    ctx.beginPath(); ctx.moveTo(px(t), py(0)); ctx.lineTo(px(t), py(1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px(0), py(t)); ctx.lineTo(px(1), py(t)); ctx.stroke();
+  }
+  ctx.restore();
+
+  // ── Trails ──
+  if (showTrail) {
+    pts.forEach((p, i) => {
+      const tr = trails[i];
+      if (tr.length < 2 || p.type === 'corner') return;
+      const base = p.type === 'inner' ? [192, 132, 252] : [56, 189, 248];
+      for (let j = 1; j < tr.length; j++) {
+        const a = (j / tr.length) * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(tr[j-1].x, tr[j-1].y);
+        ctx.lineTo(tr[j].x,   tr[j].y);
+        ctx.strokeStyle = `rgba(${base},${a})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    });
+  }
+
+  // ── Home positions (base dots) ──
+  if (showHome) {
+    DEFS.forEach((d, i) => {
+      if (d.type === 'corner') return;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(px(d.bx), py(d.by), 5, 0, Math.PI*2);
+      ctx.strokeStyle = col(d.type);
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.25;
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
+
+  // ── Grid connections (dynamic) ──
+  if (showGrid) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 1;
+    // rows
+    for (let r = 0; r < 4; r++)
+      for (let c = 0; c < 3; c++) {
+        const a = pts[r*4+c], b = pts[r*4+c+1];
+        ctx.beginPath(); ctx.moveTo(px(a.x), py(a.y)); ctx.lineTo(px(b.x), py(b.y)); ctx.stroke();
+      }
+    // cols
+    for (let c = 0; c < 4; c++)
+      for (let r = 0; r < 3; r++) {
+        const a = pts[r*4+c], b = pts[(r+1)*4+c];
+        ctx.beginPath(); ctx.moveTo(px(a.x), py(a.y)); ctx.lineTo(px(b.x), py(b.y)); ctx.stroke();
+      }
+    ctx.restore();
+  }
+
+  // ── Velocity vectors ──
+  if (showVel) {
+    const dp    = 0.05;
+    const pts2  = calcPoints(phase + dp, drift);
+    pts.forEach((p, i) => {
+      if (p.type === 'corner') return;
+      const x1 = px(p.x),  y1 = py(p.y);
+      const vx = (px(pts2[i].x) - x1) * 12;
+      const vy = (py(pts2[i].y) - y1) * 12;
+      const x2 = x1 + vx, y2 = y1 + vy;
+      const ang = Math.atan2(vy, vx);
+      ctx.save();
+      ctx.strokeStyle = col(p.type);
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.75;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.translate(x2, y2); ctx.rotate(ang);
+      ctx.fillStyle = col(p.type);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-7,-3); ctx.lineTo(-7,3); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // ── Points ──
+  pts.forEach((p, i) => {
+    const cx = px(p.x), cy = py(p.y);
+    const c  = col(p.type);
+    const r  = p.type === 'inner' ? 7 : p.type === 'edge' ? 5.5 : 4.5;
+
+    // Glow halo (skip corners)
+    if (p.type !== 'corner') {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 3.2, 0, Math.PI*2);
+      ctx.fillStyle = c;
+      ctx.globalAlpha = 0.1;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Filled circle
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.fillStyle = c;
+    ctx.fill();
+
+    // Label
+    if (showLabel) {
+      // Offset label away from edges
+      const row = Math.floor(i/4), col2 = i%4;
+      let ox = 0, oy = -15;
+      if (row === 3) oy = 15;
+      if (col2 === 0) { ox = -15; oy = 0; }
+      if (col2 === 3) { ox =  15; oy = 0; }
+      if (row===0&&col2===0){ox=11;oy=11;}
+      if (row===0&&col2===3){ox=-11;oy=11;}
+      if (row===3&&col2===0){ox=11;oy=-11;}
+      if (row===3&&col2===3){ox=-11;oy=-11;}
+      ctx.save();
+      ctx.font = '500 9.5px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = c;
+      ctx.globalAlpha = 0.65;
+      ctx.fillText(i, cx+ox, cy+oy);
+      ctx.restore();
+    }
+  });
+
+  // ── HUD ──
+  document.getElementById('i-time').textContent  = time.toFixed(3);
+  document.getElementById('i-phase').textContent = phase.toFixed(3);
+  document.getElementById('i-drift').textContent = drift.toFixed(4);
+  document.getElementById('i-coeff').textContent = coeff.toFixed(3);
+  document.getElementById('i-fps').textContent   = dispFPS;
+
+  requestAnimationFrame(draw);
+}
+
+// ── Controls ──────────────────────────────────────────────
+document.getElementById('s-act').addEventListener('input', e => {
+  activity = +e.target.value;
+  document.getElementById('v-act').textContent = activity.toFixed(2);
+});
+document.getElementById('s-spd').addEventListener('input', e => {
+  speedMult = +e.target.value;
+  document.getElementById('v-spd').textContent = speedMult.toFixed(2) + '×';
+});
+document.getElementById('t-grid').addEventListener('change',  e => showGrid  = e.target.checked);
+document.getElementById('t-trail').addEventListener('change', e => {
+  showTrail = e.target.checked;
+  if (!showTrail) trails.forEach(t => t.length = 0);
+});
+document.getElementById('t-label').addEventListener('change', e => showLabel = e.target.checked);
+document.getElementById('t-home').addEventListener('change',  e => showHome  = e.target.checked);
+document.getElementById('t-vel').addEventListener('change',   e => showVel   = e.target.checked);
+
+document.getElementById('btn-play').addEventListener('click', () => {
+  paused = !paused;
+  if (paused) {
+    pausedAt = performance.now();
+  } else {
+    pausedTotal += performance.now() - pausedAt;
+  }
+  document.getElementById('btn-lbl').textContent = paused ? '继续' : '暂停';
+  document.getElementById('ico').innerHTML = paused
+    ? '<path d="M8 5v14l11-7z"/>'
+    : '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
+});
+
+// ── Hover tooltip ─────────────────────────────────────────
+cv.addEventListener('mousemove', e => {
+  const r  = cv.getBoundingClientRect();
+  const mx = (e.clientX - r.left) / r.width  * W;
+  const my = (e.clientY - r.top)  / r.height * H;
+
+  const runMs = paused
+    ? (pausedAt - T0 - pausedTotal)
+    : (performance.now() - T0 - pausedTotal);
+  const phase = (runMs / 1000) * (0.34 + 0.28 * activity) * speedMult;
+  const drift = 0.035 + 0.07 * activity;
+  const pts   = calcPoints(phase, drift);
+
+  let best = -1, bestD = 18;
+  pts.forEach((p, i) => {
+    const d = Math.hypot(px(p.x)-mx, py(p.y)-my);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+
+  const tip = document.getElementById('tip');
+  if (best >= 0) {
+    const d = DEFS[best], p = pts[best];
+    const names = { corner:'角点 Corner', edge:'边点 Edge', inner:'内点 Inner' };
+    tip.style.display = 'block';
+    tip.style.left = (e.clientX + 15) + 'px';
+    tip.style.top  = (e.clientY - 8)  + 'px';
+    const xExpr = d.xFn
+      ? `${d.bx} + ${d.xFn==='c'?'cos':'sin'}(φ×${d.xF})×drift${d.xA<1?'×'+d.xA:''}`
+      : `${d.bx} (fixed)`;
+    const yExpr = d.yFn
+      ? `${d.by} + ${d.yFn==='c'?'cos':'sin'}(φ×${d.yF})×drift${d.yA<1?'×'+d.yA:''}`
+      : `${d.by} (fixed)`;
+    tip.innerHTML = `<div style="color:#c4b5fd;font-weight:600;margin-bottom:3px">点 #${best} · ${names[d.type]}</div>
+x = ${xExpr}<br>y = ${yExpr}<br>
+<div style="margin-top:3px;color:#94a3b8">now = (${p.x.toFixed(4)}, ${p.y.toFixed(4)})</div>`;
+  } else {
+    tip.style.display = 'none';
+  }
+});
+cv.addEventListener('mouseleave', () => { document.getElementById('tip').style.display='none'; });
+
+// ── Start ─────────────────────────────────────────────────
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -49,6 +49,18 @@ struct DailySummary: Equatable, Sendable, Identifiable {
     var id: Date { date }
 }
 
+/// One persisted text or realtime transcript message waiting to be considered
+/// by the launch-time memory organizer. `sequence` comes from a dedicated
+/// AUTOINCREMENT table, so deleting recent chats can never make the cursor move
+/// backward or cause a future message to reuse an already-processed position.
+struct AIMemoryHistoryMessage: Equatable, Sendable {
+    let sequence: Int64
+    let conversationKind: AIConversationKind
+    let role: ChatRole
+    let content: String
+    let createdAt: Date
+}
+
 /// Aggregate values for one sensor metric. A nil value means no valid samples
 /// were recorded for that metric in the requested time range.
 struct SensorMetricStatistics: Equatable, Sendable {
@@ -565,18 +577,92 @@ actor PlantDatabase {
                     """,
                 arguments: [conversationID.uuidString]
             )
+            let imageRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT images.id, images.message_id, images.mime_type, images.data
+                    FROM ai_message_images AS images
+                    INNER JOIN ai_messages AS messages ON messages.id = images.message_id
+                    WHERE messages.conversation_id = ?
+                    ORDER BY messages.created_at ASC, messages.rowid ASC, images.position ASC
+                    """,
+                arguments: [conversationID.uuidString]
+            )
             let invocationsByMessageID = Dictionary(
                 grouping: invocationRows.compactMap { Self.makeToolInvocation($0) },
                 by: \.messageID
             ).mapValues { $0.map(\.invocation) }
+            let imagesByMessageID = Dictionary(
+                grouping: imageRows.compactMap { Self.makeChatImageAttachment($0) },
+                by: \.messageID
+            ).mapValues { $0.map(\.attachment) }
             return rows.compactMap { row in
                 let messageID: String = row["id"]
                 guard let id = UUID(uuidString: messageID) else { return nil }
                 return Self.makeChatMessage(
                     row,
+                    imageAttachments: imagesByMessageID[id] ?? [],
                     toolInvocations: invocationsByMessageID[id] ?? []
                 )
             }
+        }
+    }
+
+    func memoryHistoryMessages(
+        afterSequence: Int64,
+        limit: Int
+    ) async throws -> [AIMemoryHistoryMessage] {
+        try await writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT memory_order.sequence AS memory_sequence,
+                           conversations.kind AS conversation_kind,
+                           messages.role, messages.content, messages.created_at
+                    FROM ai_memory_message_sequences AS memory_order
+                    INNER JOIN ai_messages AS messages
+                        ON messages.id = memory_order.message_id
+                    INNER JOIN ai_conversations AS conversations
+                        ON conversations.id = messages.conversation_id
+                    WHERE memory_order.sequence > ?
+                    ORDER BY memory_order.sequence ASC
+                    LIMIT ?
+                    """,
+                arguments: [afterSequence, max(1, limit)]
+            )
+            return rows.compactMap { row in
+                let roleText: String = row["role"]
+                let kindText: String = row["conversation_kind"]
+                guard let role = ChatRole(rawValue: roleText),
+                      let kind = AIConversationKind(rawValue: kindText) else {
+                    return nil
+                }
+                return AIMemoryHistoryMessage(
+                    sequence: row["memory_sequence"],
+                    conversationKind: kind,
+                    role: role,
+                    content: row["content"],
+                    createdAt: row["created_at"]
+                )
+            }
+        }
+    }
+
+    /// Converts the cursor used by schema-v1 memory files. During migration,
+    /// existing message row ids are copied into both sequence columns, so the
+    /// greatest surviving row at or below the old cursor is the exact durable
+    /// position from which incremental organization should resume.
+    func memorySequence(forLegacyRowID rowID: Int64) async throws -> Int64 {
+        try await writer.read { db in
+            try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT MAX(sequence)
+                    FROM ai_memory_message_sequences
+                    WHERE legacy_row_id <= ?
+                    """,
+                arguments: [rowID]
+            ) ?? 0
         }
     }
 
@@ -596,6 +682,29 @@ actor PlantDatabase {
                     message.createdAt
                 ]
             )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_memory_message_sequences (message_id)
+                    VALUES (?)
+                    """,
+                arguments: [message.id.uuidString]
+            )
+            for (position, attachment) in message.imageAttachments.enumerated() {
+                try db.execute(
+                    sql: """
+                        INSERT INTO ai_message_images (
+                            id, message_id, position, mime_type, data
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        attachment.id,
+                        message.id.uuidString,
+                        position,
+                        attachment.mimeType,
+                        attachment.data
+                    ]
+                )
+            }
             for (position, invocation) in message.toolInvocations.enumerated() {
                 try db.execute(
                     sql: """
@@ -882,7 +991,137 @@ actor PlantDatabase {
                 columns: ["message_id", "position"]
             )
         }
+        migrator.registerMigration("add stable ai memory message sequence") { db in
+            try db.create(table: "ai_memory_message_sequences") { table in
+                table.autoIncrementedPrimaryKey("sequence")
+                table.column("message_id", .text)
+                    .notNull()
+                    .unique()
+                    .references("ai_messages", onDelete: .cascade)
+                table.column("legacy_row_id", .integer)
+            }
+
+            // Preserve the old rowid coordinate system for the one-time cursor
+            // conversion while future inserts use a non-reusable sequence.
+            try db.execute(sql: """
+                INSERT INTO ai_memory_message_sequences (
+                    sequence, message_id, legacy_row_id
+                )
+                SELECT rowid, id, rowid
+                FROM ai_messages
+                ORDER BY rowid ASC
+                """)
+        }
+        migrator.registerMigration("store ai message images") { db in
+            try Self.createAIMessageImagesTable(db)
+            try Self.createAIMessageImagesIndex(db)
+        }
+        migrator.registerMigration("repair legacy ai message image storage") { db in
+            guard try db.tableExists("ai_message_images") else {
+                try Self.createAIMessageImagesTable(db)
+                try Self.createAIMessageImagesIndex(db)
+                return
+            }
+
+            let columns = Set(try db.columns(in: "ai_message_images").map(\.name))
+            guard !columns.isSuperset(of: ["mime_type", "data"]) else { return }
+
+            // An early development build stored the complete data URL in one
+            // TEXT column. GRDB records migration identifiers, so changing the
+            // old migration body cannot repair devices that already ran it.
+            // Rebuild the table under a new migration and preserve every valid
+            // legacy image while converting its base64 payload to a BLOB.
+            let legacyRows = try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM ai_message_images ORDER BY message_id, position"
+            )
+            let legacyTable = "ai_message_images_before_blob_storage"
+            try db.rename(table: "ai_message_images", to: legacyTable)
+            try Self.createAIMessageImagesTable(db)
+
+            for row in legacyRows {
+                guard let attachment = Self.makeLegacyChatImageAttachment(row) else {
+                    continue
+                }
+                let messageID: String = row["message_id"]
+                let position: Int = row["position"]
+                try db.execute(
+                    sql: """
+                        INSERT INTO ai_message_images (
+                            id, message_id, position, mime_type, data
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        attachment.id,
+                        messageID,
+                        position,
+                        attachment.mimeType,
+                        attachment.data
+                    ]
+                )
+            }
+
+            try db.drop(table: legacyTable)
+            try Self.createAIMessageImagesIndex(db)
+        }
         return migrator
+    }
+
+    private static func createAIMessageImagesTable(_ db: Database) throws {
+        try db.create(table: "ai_message_images") { table in
+            table.column("id", .text).primaryKey()
+            table.column("message_id", .text)
+                .notNull()
+                .references("ai_messages", onDelete: .cascade)
+            table.column("position", .integer).notNull()
+            table.column("mime_type", .text).notNull()
+            table.column("data", .blob).notNull()
+            table.uniqueKey(["message_id", "position"])
+        }
+    }
+
+    private static func createAIMessageImagesIndex(_ db: Database) throws {
+        try db.create(
+            index: "ai_message_images_message_position",
+            on: "ai_message_images",
+            columns: ["message_id", "position"]
+        )
+    }
+
+    private static func makeLegacyChatImageAttachment(
+        _ row: Row
+    ) -> ChatImageAttachment? {
+        let id: String = row["id"]
+        if row.hasColumn("data"), let data: Data = row["data"] {
+            let mimeType: String = row.hasColumn("mime_type")
+                ? (row["mime_type"] ?? "image/jpeg")
+                : "image/jpeg"
+            return ChatImageAttachment(id: id, mimeType: mimeType, data: data)
+        }
+
+        guard row.hasColumn("data_url"),
+              let dataURL: String = row["data_url"],
+              dataURL.hasPrefix("data:"),
+              let commaIndex = dataURL.firstIndex(of: ",") else {
+            return nil
+        }
+        let metadataStart = dataURL.index(dataURL.startIndex, offsetBy: 5)
+        let metadata = String(dataURL[metadataStart..<commaIndex])
+        guard metadata.lowercased().contains(";base64") else { return nil }
+        let mimeType = metadata
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map(String.init)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "image/jpeg"
+        let payloadStart = dataURL.index(after: commaIndex)
+        guard let data = Data(
+            base64Encoded: String(dataURL[payloadStart...]),
+            options: .ignoreUnknownCharacters
+        ) else {
+            return nil
+        }
+        return ChatImageAttachment(id: id, mimeType: mimeType, data: data)
     }
 
     private static func fetchHistoryReadings(_ db: Database) throws -> [HistoryReading] {
@@ -994,6 +1233,7 @@ actor PlantDatabase {
 
     private static func makeChatMessage(
         _ row: Row,
+        imageAttachments: [ChatImageAttachment] = [],
         toolInvocations: [ToolInvocation] = []
     ) -> ChatMessage? {
         let idText: String = row["id"]
@@ -1010,7 +1250,28 @@ actor PlantDatabase {
             role: role,
             content: row["content"],
             createdAt: row["created_at"],
+            imageAttachments: imageAttachments,
             toolInvocations: toolInvocations
+        )
+    }
+
+    private struct StoredChatImageAttachment {
+        let messageID: UUID
+        let attachment: ChatImageAttachment
+    }
+
+    private static func makeChatImageAttachment(
+        _ row: Row
+    ) -> StoredChatImageAttachment? {
+        let messageIDText: String = row["message_id"]
+        guard let messageID = UUID(uuidString: messageIDText) else { return nil }
+        return StoredChatImageAttachment(
+            messageID: messageID,
+            attachment: ChatImageAttachment(
+                id: row["id"],
+                mimeType: row["mime_type"],
+                data: row["data"]
+            )
         )
     }
 

@@ -163,6 +163,36 @@ enum QwenRealtimeToolProtocol {
             "type": "response.create"
         ]
     }
+
+    static func historyMessageEvent(
+        eventID: String,
+        message: ChatMessage
+    ) -> [String: Any]? {
+        let contentType: String
+        switch message.role {
+        case .user:
+            contentType = "input_text"
+        case .assistant:
+            contentType = "output_text"
+        case .system:
+            return nil
+        }
+
+        let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return [
+            "event_id": eventID,
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": message.role.rawValue,
+                "content": [[
+                    "type": contentType,
+                    "text": text
+                ]]
+            ]
+        ]
+    }
 }
 
 @MainActor
@@ -189,6 +219,7 @@ final class QwenRealtimeConversation {
     @ObservationIgnored private let database: PlantDatabase
     @ObservationIgnored private let bluetooth: PlantBluetoothManager
     @ObservationIgnored private let plantBindingResolver: PlantConversationBindingResolver
+    @ObservationIgnored private let memoryStore: PlantMemoryStore
     @ObservationIgnored private var toolExecutor: PlantDataToolExecutor?
     @ObservationIgnored private let audioIO = RealtimeAudioIO()
     @ObservationIgnored private var webSocket: URLSessionWebSocketTask?
@@ -218,18 +249,35 @@ final class QwenRealtimeConversation {
     init(
         database: PlantDatabase,
         bluetooth: PlantBluetoothManager,
-        plantBindingResolver: PlantConversationBindingResolver
+        plantBindingResolver: PlantConversationBindingResolver,
+        memoryStore: PlantMemoryStore
     ) {
         self.database = database
         self.bluetooth = bluetooth
         self.plantBindingResolver = plantBindingResolver
+        self.memoryStore = memoryStore
     }
 
-    func start() async {
+    func start(
+        resuming conversation: AIConversation? = nil,
+        messages: [ChatMessage] = []
+    ) async {
         guard !state.isActive else { return }
+        let historyMessages = messages.filter {
+            $0.role != .system
+                && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         let attemptID = UUID()
         startAttemptID = attemptID
-        entries = []
+        entries = historyMessages.map { message in
+            RealtimeTranscriptEntry(
+                id: message.id,
+                role: message.role,
+                text: message.content,
+                createdAt: message.createdAt,
+                toolInvocations: message.toolInvocations
+            )
+        }
         currentUserText = ""
         currentAssistantText = ""
         currentUserEntryID = nil
@@ -237,6 +285,9 @@ final class QwenRealtimeConversation {
         currentUserStartedAt = nil
         currentAssistantStartedAt = nil
         currentPersistenceSessionID = UUID()
+        if let conversation {
+            conversationsBySessionID[currentPersistenceSessionID] = conversation
+        }
         isUserSpeaking = false
         isWaitingForAssistantText = false
         voiceVisualDriver.reset()
@@ -313,6 +364,14 @@ final class QwenRealtimeConversation {
             }
 
             try await sendSessionUpdate(configuration, plantBinding: plantBinding)
+            guard isCurrentStartAttempt(attemptID) else { return }
+            for message in historyMessages {
+                guard let event = QwenRealtimeToolProtocol.historyMessageEvent(
+                    eventID: "event_\(UUID().uuidString)",
+                    message: message
+                ) else { continue }
+                try await sendJSON(event)
+            }
             guard isCurrentStartAttempt(attemptID) else { return }
             receiveTask = Task { [weak self] in
                 await self?.receiveMessages(from: socket, attemptID: attemptID)
@@ -677,12 +736,14 @@ final class QwenRealtimeConversation {
     nonisolated static func sessionInstructions(
         systemPrompt: String,
         plantBinding: PlantConversationBinding,
+        memoryContext: String = "",
         now: Date = Date(),
         timeZone: TimeZone = .current
     ) -> String {
         [
             systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             plantBinding.modelInstructions,
+            memoryContext,
             PlantDataToolCatalog.usageInstructions,
             "当前本地时间：\(now.formatted(date: .abbreviated, time: .standard))（\(timeZone.identifier)）。"
         ]
@@ -694,9 +755,11 @@ final class QwenRealtimeConversation {
         _ configuration: QwenRealtimeConfiguration,
         plantBinding: PlantConversationBinding
     ) async throws {
+        let memoryContext = (try? await memoryStore.promptContext()) ?? ""
         let instructions = Self.sessionInstructions(
             systemPrompt: configuration.systemPrompt,
-            plantBinding: plantBinding
+            plantBinding: plantBinding,
+            memoryContext: memoryContext
         )
         let tools = try QwenRealtimeToolProtocol.sessionTools(
             from: PlantDataToolCatalog.definitions

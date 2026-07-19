@@ -1,7 +1,13 @@
 .DS_Store
 .build/
+build/
 .playwright-mcp/
+tmp/
+web/
 
 # Xcode personal state
 **/xcuserdata/
 *.xcuserstate
+
+
+

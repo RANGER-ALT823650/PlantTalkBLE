@@ -2,6 +2,8 @@ import SwiftUI
 
 struct HistoryOverviewView: View {
     let database: PlantDatabase
+    let onContinueTextConversation: (AIConversation, [ChatMessage]) -> Void
+    let onContinueRealtimeConversation: (AIConversation, [ChatMessage]) -> Void
     @State private var selectedTab: HistoryTab = .sensor
 
     var body: some View {
@@ -12,13 +14,19 @@ struct HistoryOverviewView: View {
                     Label("传感器", systemImage: "sensor.tag.radiowaves.forward")
                 }
 
-            ConversationListView(database: database)
+            ConversationListView(
+                database: database,
+                onContinueConversation: onContinueTextConversation
+            )
                 .tag(HistoryTab.textConversation)
                 .tabItem {
                     Label("文字对话", systemImage: "text.bubble")
                 }
 
-            RealtimeConversationHistoryView(database: database)
+            RealtimeConversationHistoryView(
+                database: database,
+                onContinueConversation: onContinueRealtimeConversation
+            )
                 .tag(HistoryTab.realtimeConversation)
                 .tabItem {
                     Label("实时语音", systemImage: "waveform")

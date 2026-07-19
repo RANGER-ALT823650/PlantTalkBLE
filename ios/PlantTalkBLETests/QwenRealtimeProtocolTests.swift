@@ -232,6 +232,62 @@ final class QwenRealtimeProtocolTests: XCTestCase {
         XCTAssertThrowsError(try QwenRealtimeToolProtocol.toolCall(from: missingCallID))
     }
 
+    func testHistoryMessagesUseRoleSpecificRealtimeContentTypes() throws {
+        let conversationID = UUID()
+        let userEvent = try XCTUnwrap(QwenRealtimeToolProtocol.historyMessageEvent(
+            eventID: "event_history_user",
+            message: ChatMessage(
+                id: UUID(),
+                conversationID: conversationID,
+                role: .user,
+                content: "之前土壤有点干",
+                createdAt: Date()
+            )
+        ))
+        let assistantEvent = try XCTUnwrap(QwenRealtimeToolProtocol.historyMessageEvent(
+            eventID: "event_history_assistant",
+            message: ChatMessage(
+                id: UUID(),
+                conversationID: conversationID,
+                role: .assistant,
+                content: "建议补充少量水分",
+                createdAt: Date()
+            )
+        ))
+
+        let userItem = try XCTUnwrap(userEvent["item"] as? [String: Any])
+        let assistantItem = try XCTUnwrap(assistantEvent["item"] as? [String: Any])
+        let userContent = try XCTUnwrap((userItem["content"] as? [[String: Any]])?.first)
+        let assistantContent = try XCTUnwrap(
+            (assistantItem["content"] as? [[String: Any]])?.first
+        )
+
+        XCTAssertEqual(userEvent["type"] as? String, "conversation.item.create")
+        XCTAssertEqual(userItem["role"] as? String, "user")
+        XCTAssertEqual(userContent["type"] as? String, "input_text")
+        XCTAssertEqual(userContent["text"] as? String, "之前土壤有点干")
+        XCTAssertEqual(assistantItem["role"] as? String, "assistant")
+        XCTAssertEqual(assistantContent["type"] as? String, "output_text")
+        XCTAssertEqual(assistantContent["text"] as? String, "建议补充少量水分")
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: userEvent))
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: assistantEvent))
+    }
+
+    func testSystemMessagesAreNotInjectedAsConversationHistory() {
+        let event = QwenRealtimeToolProtocol.historyMessageEvent(
+            eventID: "event_history_system",
+            message: ChatMessage(
+                id: UUID(),
+                conversationID: UUID(),
+                role: .system,
+                content: "系统指令",
+                createdAt: Date()
+            )
+        )
+
+        XCTAssertNil(event)
+    }
+
     func testSessionUpdateUsesQwenNestedToolSchemaWithoutUnsupportedToolChoice() throws {
         let tools = try QwenRealtimeToolProtocol.sessionTools(
             from: PlantDataToolCatalog.definitions
@@ -270,12 +326,14 @@ final class QwenRealtimeProtocolTests: XCTestCase {
         let instructions = QwenRealtimeConversation.sessionInstructions(
             systemPrompt: "你是一株植物。",
             plantBinding: .bound(deviceID: "ESP32-CURRENT", source: .savedCurrentPlant),
+            memoryContext: "<long_term_memory>用户希望被称为小凡</long_term_memory>",
             now: Date(timeIntervalSince1970: 1_700_000_000),
             timeZone: TimeZone(identifier: "Asia/Shanghai")!
         )
 
         XCTAssertTrue(instructions.contains("ESP32-CURRENT"))
         XCTAssertTrue(instructions.contains("不要要求用户重复说明"))
+        XCTAssertTrue(instructions.contains("用户希望被称为小凡"))
         XCTAssertTrue(instructions.contains("get_sensor_summary"))
     }
 

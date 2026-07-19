@@ -12,9 +12,59 @@ enum ConversationMediaSource: String, Identifiable {
     var id: Self { self }
 }
 
-struct ConversationImageAttachment: Identifiable {
+struct ConversationImageAttachment: Identifiable, Equatable {
     let id: String
     let image: UIImage
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    @MainActor
+    func encodedChatAttachment(
+        maximumPixelDimension: CGFloat = 2_048,
+        compressionQuality: CGFloat = 0.82
+    ) throws -> ChatImageAttachment {
+        let originalSize = image.size
+        guard originalSize.width > 0, originalSize.height > 0 else {
+            throw ConversationImageAttachmentError.invalidImage
+        }
+
+        let largestDimension = max(originalSize.width, originalSize.height)
+        let scale = min(1, maximumPixelDimension / largestDimension)
+        let outputSize = CGSize(
+            width: max(1, (originalSize.width * scale).rounded()),
+            height: max(1, (originalSize.height * scale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderedImage = UIGraphicsImageRenderer(size: outputSize, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: outputSize))
+        }
+        guard let data = renderedImage.jpegData(compressionQuality: compressionQuality) else {
+            throw ConversationImageAttachmentError.encodingFailed
+        }
+        return ChatImageAttachment(
+            id: id,
+            mimeType: "image/jpeg",
+            data: data
+        )
+    }
+}
+
+enum ConversationImageAttachmentError: LocalizedError {
+    case invalidImage
+    case encodingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidImage:
+            "所选图片无效，请重新选择。"
+        case .encodingFailed:
+            "无法处理所选图片，请重新选择。"
+        }
+    }
 }
 
 private enum ConversationPhotoLibraryControlShape {

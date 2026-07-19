@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct ConversationListView: View {
     let database: PlantDatabase
+    let onContinueConversation: (AIConversation, [ChatMessage]) -> Void
 
     @State private var conversations: [AIConversation] = []
     @State private var isLoading = true
@@ -25,7 +26,8 @@ struct ConversationListView: View {
                         NavigationLink {
                             TextConversationTranscriptView(
                                 database: database,
-                                conversation: conversation
+                                conversation: conversation,
+                                onContinueConversation: onContinueConversation
                             )
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
@@ -121,6 +123,7 @@ struct ConversationListView: View {
 private struct TextConversationTranscriptView: View {
     let database: PlantDatabase
     let conversation: AIConversation
+    let onContinueConversation: (AIConversation, [ChatMessage]) -> Void
 
     @State private var messages: [ChatMessage] = []
     @State private var isLoading = true
@@ -152,6 +155,16 @@ private struct TextConversationTranscriptView: View {
         }
         .navigationTitle(conversation.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    onContinueConversation(conversation, messages)
+                } label: {
+                    Label("继续对话", systemImage: "arrowshape.turn.up.right.fill")
+                }
+                .disabled(isLoading || messages.isEmpty)
+            }
+        }
         .task {
             await loadMessages()
         }

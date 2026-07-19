@@ -147,10 +147,32 @@ private enum ConversationAttachmentLayout {
     static let cornerRadius: CGFloat = 17
 }
 
+typealias ConversationImagePreviewAction = (
+    _ image: UIImage,
+    _ sourceID: String,
+    _ sourceFrame: CGRect
+) -> Void
+
 private struct ConversationAttachmentStrip: View {
     let attachments: [ConversationImageAttachment]
     let isInteractive: Bool
+    let activePreviewSourceID: String?
+    let onPreview: ConversationImagePreviewAction?
     let onRemove: (String) -> Void
+
+    init(
+        attachments: [ConversationImageAttachment],
+        isInteractive: Bool,
+        activePreviewSourceID: String? = nil,
+        onPreview: ConversationImagePreviewAction? = nil,
+        onRemove: @escaping (String) -> Void
+    ) {
+        self.attachments = attachments
+        self.isInteractive = isInteractive
+        self.activePreviewSourceID = activePreviewSourceID
+        self.onPreview = onPreview
+        self.onRemove = onRemove
+    }
 
     var body: some View {
         Group {
@@ -181,18 +203,31 @@ private struct ConversationAttachmentStrip: View {
         _ attachment: ConversationImageAttachment,
         index: Int
     ) -> some View {
-        ZStack(alignment: .topTrailing) {
-            Image(uiImage: attachment.image)
-                .resizable()
-                .scaledToFill()
-                .frame(
-                    width: ConversationAttachmentLayout.itemSide,
-                    height: ConversationAttachmentLayout.itemSide
-                )
-                .clipShape(RoundedRectangle(
-                    cornerRadius: ConversationAttachmentLayout.cornerRadius,
-                    style: .continuous
-                ))
+        let sourceID = "composer:\(attachment.id)"
+
+        return ZStack(alignment: .topTrailing) {
+            GeometryReader { proxy in
+                Button {
+                    onPreview?(
+                        attachment.image,
+                        sourceID,
+                        proxy.frame(in: .global)
+                    )
+                } label: {
+                    attachmentThumbnail(attachment.image, sourceID: sourceID)
+                        .frame(
+                            width: ConversationAttachmentLayout.itemSide,
+                            height: ConversationAttachmentLayout.itemSide
+                        )
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: ConversationAttachmentLayout.cornerRadius,
+                            style: .continuous
+                        ))
+                }
+                .buttonStyle(.plain)
+                .allowsHitTesting(isInteractive && onPreview != nil)
+                .accessibilityLabel("预览第\(index + 1)张照片")
+            }
 
             Button {
                 onRemove(attachment.id)
@@ -206,12 +241,183 @@ private struct ConversationAttachmentStrip: View {
             .buttonStyle(.plain)
             .padding(4)
             .allowsHitTesting(isInteractive)
+            .opacity(activePreviewSourceID == sourceID ? 0 : 1)
             .accessibilityLabel("移除第\(index + 1)张照片")
         }
         .frame(
             width: ConversationAttachmentLayout.itemSide,
             height: ConversationAttachmentLayout.itemSide
         )
+    }
+
+    @ViewBuilder
+    private func attachmentThumbnail(
+        _ image: UIImage,
+        sourceID: String
+    ) -> some View {
+        if activePreviewSourceID == sourceID {
+            Color.clear
+        } else {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+        }
+    }
+}
+
+private struct ConversationImagePreviewItem: Identifiable {
+    let id: String
+    let image: UIImage
+    let sourceFrame: CGRect
+}
+
+private struct ConversationImagePreviewOverlay: View {
+    let item: ConversationImagePreviewItem
+    let progress: CGFloat
+    let onDismiss: () -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let overlayFrame = proxy.frame(in: .global)
+            let sourceFrame = item.sourceFrame.offsetBy(
+                dx: -overlayFrame.minX,
+                dy: -overlayFrame.minY
+            )
+            let destinationFrame = previewFrame(in: proxy)
+            let currentFrame = interpolatedFrame(
+                from: sourceFrame,
+                to: destinationFrame,
+                progress: progress
+            )
+            let destinationCorner = previewCornerSize(
+                previewFrame: destinationFrame,
+                proxy: proxy
+            )
+            let currentCorner = CGSize(
+                width: interpolate(
+                    ConversationAttachmentLayout.cornerRadius,
+                    destinationCorner.width,
+                    progress
+                ),
+                height: interpolate(
+                    ConversationAttachmentLayout.cornerRadius,
+                    destinationCorner.height,
+                    progress
+                )
+            )
+
+            ZStack {
+                Color.clear
+
+                Image(uiImage: item.image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(
+                        width: max(currentFrame.width, 1),
+                        height: max(currentFrame.height, 1)
+                    )
+                    .clipShape(ConversationMediaMorphShape(
+                        cornerWidth: currentCorner.width,
+                        cornerHeight: currentCorner.height
+                    ))
+                    .position(x: currentFrame.midX, y: currentFrame.midY)
+                    .accessibilityLabel("图片预览")
+                    .accessibilityHint("轻点关闭预览")
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onDismiss)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func previewFrame(in proxy: GeometryProxy) -> CGRect {
+        let horizontalInset = proxy.size.width * 0.06
+            + max(proxy.safeAreaInsets.leading, proxy.safeAreaInsets.trailing)
+        let verticalInset = proxy.size.height * 0.06
+            + max(proxy.safeAreaInsets.top, proxy.safeAreaInsets.bottom)
+        let availableSize = CGSize(
+            width: max(proxy.size.width - horizontalInset * 2, 0),
+            height: max(proxy.size.height - verticalInset * 2, 0)
+        )
+        let imageSize = aspectFitSize(item.image.size, inside: availableSize)
+        return CGRect(
+            x: (proxy.size.width - imageSize.width) / 2,
+            y: (proxy.size.height - imageSize.height) / 2,
+            width: imageSize.width,
+            height: imageSize.height
+        )
+    }
+
+    private func aspectFitSize(_ source: CGSize, inside bounds: CGSize) -> CGSize {
+        guard source.width > 0,
+              source.height > 0,
+              bounds.width > 0,
+              bounds.height > 0 else { return .zero }
+        let scale = min(bounds.width / source.width, bounds.height / source.height)
+        return CGSize(width: source.width * scale, height: source.height * scale)
+    }
+
+    private func previewCornerSize(
+        previewFrame: CGRect,
+        proxy: GeometryProxy
+    ) -> CGSize {
+        guard proxy.size.width > 0, proxy.size.height > 0 else { return .zero }
+        let screenCorner = screenCornerSize(in: proxy)
+        return CGSize(
+            width: (screenCorner.width / proxy.size.width) * previewFrame.width,
+            height: (screenCorner.height / proxy.size.height) * previewFrame.height
+        )
+    }
+
+    private func screenCornerSize(in proxy: GeometryProxy) -> CGSize {
+        if #available(iOS 26, *) {
+            let insets = proxy.containerCornerInsets
+            let cornerSize = CGSize(
+                width: [
+                    insets.topLeading.width,
+                    insets.topTrailing.width,
+                    insets.bottomLeading.width,
+                    insets.bottomTrailing.width
+                ].max() ?? 0,
+                height: [
+                    insets.topLeading.height,
+                    insets.topTrailing.height,
+                    insets.bottomLeading.height,
+                    insets.bottomTrailing.height
+                ].max() ?? 0
+            )
+            if cornerSize.width > 0, cornerSize.height > 0 {
+                return cornerSize
+            }
+        }
+
+        let screenMinimum = min(proxy.size.width, proxy.size.height)
+        let radius = min(
+            max(proxy.safeAreaInsets.top * 0.72, screenMinimum * 0.06),
+            screenMinimum * 0.14
+        )
+        return CGSize(width: radius, height: radius)
+    }
+
+    private func interpolatedFrame(
+        from source: CGRect,
+        to destination: CGRect,
+        progress: CGFloat
+    ) -> CGRect {
+        CGRect(
+            x: interpolate(source.minX, destination.minX, progress),
+            y: interpolate(source.minY, destination.minY, progress),
+            width: interpolate(source.width, destination.width, progress),
+            height: interpolate(source.height, destination.height, progress)
+        )
+    }
+
+    private func interpolate(
+        _ start: CGFloat,
+        _ end: CGFloat,
+        _ progress: CGFloat
+    ) -> CGFloat {
+        start + ((end - start) * min(max(progress, 0), 1))
     }
 }
 
@@ -339,14 +545,18 @@ private struct ConversationAttachmentTransferModifier: AnimatableModifier {
 struct TextConversationView: View {
     let database: PlantDatabase
     let client: OpenAICompatibleClient
+    let memoryStore: PlantMemoryStore
     let toolExecutor: PlantDataToolExecutor
     let plantBinding: PlantConversationBinding
     let initialMessage: String
     let initialMessageID: UUID
     let initialMessageDate: Date
+    let isResumedConversation: Bool
+    let isPagePresented: Bool
     let isInitialTransitionComplete: Bool
     let completedMessageFlightID: UUID?
     let startedMessageFlightID: UUID?
+    let configurationProvider: () throws -> AIConfiguration
     let onMessageFlightRequested: (MessageFlightRequest) -> Void
     let onMessageFlightCancelled: (UUID) -> Void
     let onHome: () -> Void
@@ -356,6 +566,7 @@ struct TextConversationView: View {
     @State private var draft = ""
     @State private var composerFrame = CGRect.zero
     @State private var outgoingTransition: OutgoingMessageTransition?
+    @State private var messageFlightComposerReservation: MessageFlightComposerReservation?
     @State private var flightDestinationReadyID: UUID?
     @State private var pendingCatchUpMessageID: UUID?
     @State private var isScrolledToBottom = true
@@ -381,7 +592,10 @@ struct TextConversationView: View {
     @State private var attachmentTransferProgress: CGFloat = 0
     @State private var isAttachmentTransferInProgress = false
     @State private var attachmentTransferTask: Task<Void, Never>?
+    @State private var imagePreviewItem: ConversationImagePreviewItem?
+    @State private var imagePreviewProgress: CGFloat = 0
     @State private var hasStartedInitialMessage = false
+    @State private var errorTitle = "对话失败"
     @State private var errorMessage: String?
     @State private var isShowingError = false
     @State private var streamingTask: Task<Void, Never>?
@@ -394,31 +608,49 @@ struct TextConversationView: View {
     init(
         database: PlantDatabase,
         client: OpenAICompatibleClient,
+        memoryStore: PlantMemoryStore,
         toolExecutor: PlantDataToolExecutor,
         plantBinding: PlantConversationBinding,
         initialMessage: String,
         initialMessageID: UUID,
         initialMessageDate: Date,
+        resumedConversation: AIConversation? = nil,
+        resumedMessages: [ChatMessage] = [],
+        isPagePresented: Bool = true,
         isInitialTransitionComplete: Bool,
         completedMessageFlightID: UUID?,
         startedMessageFlightID: UUID?,
+        initialPendingImageAttachments: [ConversationImageAttachment] = [],
+        configurationProvider: @escaping () throws -> AIConfiguration = {
+            try AISettingsStore.configuration()
+        },
         onMessageFlightRequested: @escaping (MessageFlightRequest) -> Void,
         onMessageFlightCancelled: @escaping (UUID) -> Void,
         onHome: @escaping () -> Void
     ) {
         self.database = database
         self.client = client
+        self.memoryStore = memoryStore
         self.toolExecutor = toolExecutor
         self.plantBinding = plantBinding
         self.initialMessage = initialMessage
         self.initialMessageID = initialMessageID
         self.initialMessageDate = initialMessageDate
+        self.isResumedConversation = resumedConversation != nil
+        self.isPagePresented = isPagePresented
         self.isInitialTransitionComplete = isInitialTransitionComplete
         self.completedMessageFlightID = completedMessageFlightID
         self.startedMessageFlightID = startedMessageFlightID
+        self.configurationProvider = configurationProvider
         self.onMessageFlightRequested = onMessageFlightRequested
         self.onMessageFlightCancelled = onMessageFlightCancelled
         self.onHome = onHome
+        _conversation = State(initialValue: resumedConversation)
+        _messages = State(initialValue: resumedMessages)
+        _isInitialMessageDiscarded = State(initialValue: resumedConversation != nil)
+        _isComposerVisible = State(initialValue: resumedConversation != nil)
+        _hasStartedInitialMessage = State(initialValue: resumedConversation != nil)
+        _pendingImageAttachments = State(initialValue: initialPendingImageAttachments)
     }
 
     var body: some View {
@@ -439,6 +671,8 @@ struct TextConversationView: View {
                         if message.id != initialMessageID {
                             ChatMessageBubble(
                                 message: message,
+                                activeImagePreviewSourceID: imagePreviewItem?.id,
+                                onImagePreview: presentImagePreview,
                                 flightDestinationID: outgoingTransition?.id == message.id
                                     && outgoingTransition?.presentation == .messageFlight
                                     ? message.id
@@ -521,6 +755,13 @@ struct TextConversationView: View {
                         : .easeOut(duration: 0.2)
                 )
             }
+            .task {
+                startInitialMessage()
+                guard isResumedConversation,
+                      let lastMessageID = messages.last?.id else { return }
+                await Task.yield()
+                proxy.scrollTo(lastMessageID, anchor: .bottom)
+            }
         }
         .background {
             ChatConversationBackdrop()
@@ -529,8 +770,15 @@ struct TextConversationView: View {
         .overlay {
             mediaPanelOverlay
         }
-        .task {
-            startInitialMessage()
+        .overlay {
+            if let imagePreviewItem {
+                ConversationImagePreviewOverlay(
+                    item: imagePreviewItem,
+                    progress: imagePreviewProgress,
+                    onDismiss: dismissImagePreview
+                )
+                .transition(.identity)
+            }
         }
         .task(id: isInitialTransitionComplete) {
             guard isInitialTransitionComplete else { return }
@@ -547,6 +795,7 @@ struct TextConversationView: View {
                 if flightDestinationReadyID == completedID {
                     flightDestinationReadyID = nil
                 }
+                releaseMessageFlightComposerReservation(for: completedID)
             }
             guard let completedID,
                   var outgoing = outgoingTransition,
@@ -559,21 +808,32 @@ struct TextConversationView: View {
                   let outgoing = outgoingTransition,
                   outgoing.id == startedID,
                   outgoing.presentation == .messageFlight else { return }
-            if trimmedDraft == outgoing.text {
-                var transaction = Transaction(animation: nil)
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                if trimmedDraft == outgoing.composerText {
                     draft = ""
                 }
+                if pendingImageAttachments.map(\.id)
+                    == outgoing.composerAttachments.map(\.id) {
+                    pendingImageAttachments = []
+                }
             }
-            clearRecommittedDraftIfNeeded(afterSubmitting: outgoing.text)
+            clearRecommittedDraftIfNeeded(afterSubmitting: outgoing.composerText)
+        }
+        .onChange(of: isPagePresented) { _, isPresented in
+            guard !isPresented else { return }
+            isInputFocused = false
+            isAccessoryMenuExpanded = false
+            imagePreviewItem = nil
+            imagePreviewProgress = 0
         }
         .onDisappear {
             streamingTask?.cancel()
             mediaPanelAnimationTask?.cancel()
             attachmentTransferTask?.cancel()
         }
-        .alert("对话失败", isPresented: $isShowingError) {
+        .alert(errorTitle, isPresented: $isShowingError) {
             Button("好", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "未知错误")
@@ -636,6 +896,12 @@ struct TextConversationView: View {
     private var composerControls: some View {
         HStack(alignment: .bottom, spacing: 10) {
             composerTextEntry
+                // Clearing an image composer makes safeAreaBar shorter. Keep
+                // its previous height until the flight reaches the bubble.
+                .frame(
+                    height: messageFlightComposerReservation?.height,
+                    alignment: .bottom
+                )
                 .messageFlightSource()
                 .onPreferenceChange(MessageFlightSourcePreferenceKey.self) {
                     composerFrame = $0
@@ -777,6 +1043,8 @@ struct TextConversationView: View {
         let strip = ConversationAttachmentStrip(
             attachments: pendingImageAttachments,
             isInteractive: true,
+            activePreviewSourceID: imagePreviewItem?.id,
+            onPreview: presentImagePreview,
             onRemove: removePendingImageAttachment
         )
 
@@ -993,7 +1261,7 @@ struct TextConversationView: View {
             .tint(isStreaming ? Color(uiColor: .systemRed) : Color.accentColor)
             .glassEffectID("conversation-send", in: accessoryMenuNamespace)
             .glassEffectTransition(.matchedGeometry)
-            .disabled(trimmedDraft.isEmpty && !isStreaming)
+            .disabled(!canSendComposerContent && !isStreaming)
             .accessibilityLabel(isStreaming ? "停止生成" : "发送")
         } else {
             Button(action: handleSendButton) {
@@ -1004,13 +1272,17 @@ struct TextConversationView: View {
             .buttonBorderShape(.circle)
             .controlSize(.large)
             .tint(isStreaming ? Color(uiColor: .systemRed) : Color.accentColor)
-            .disabled(trimmedDraft.isEmpty && !isStreaming)
+            .disabled(!canSendComposerContent && !isStreaming)
             .accessibilityLabel(isStreaming ? "停止生成" : "发送")
         }
     }
 
     private var trimmedDraft: String {
         draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSendComposerContent: Bool {
+        !trimmedDraft.isEmpty || !pendingImageAttachments.isEmpty
     }
 
     private var thinkingTransition: AnyTransition {
@@ -1276,6 +1548,59 @@ struct TextConversationView: View {
         }
     }
 
+    private func presentImagePreview(
+        _ image: UIImage,
+        sourceID: String,
+        sourceFrame: CGRect
+    ) {
+        guard imagePreviewItem == nil, !sourceFrame.isEmpty else { return }
+
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            imagePreviewProgress = 0
+            imagePreviewItem = ConversationImagePreviewItem(
+                id: sourceID,
+                image: image,
+                sourceFrame: sourceFrame
+            )
+        }
+
+        Task { @MainActor in
+            await Task.yield()
+            guard imagePreviewItem?.id == sourceID else { return }
+            withAnimation(imagePreviewAnimation) {
+                imagePreviewProgress = 1
+            }
+        }
+    }
+
+    private func dismissImagePreview() {
+        guard let sourceID = imagePreviewItem?.id else { return }
+        // `.smooth` has a visual spring tail. Keep the overlay alive until that
+        // tail is fully removed so its last rendered frame matches the source.
+        withAnimation(
+            imagePreviewAnimation,
+            completionCriteria: .removed
+        ) {
+            imagePreviewProgress = 0
+        } completion: {
+            guard imagePreviewItem?.id == sourceID,
+                  imagePreviewProgress <= 0.001 else { return }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                imagePreviewItem = nil
+            }
+        }
+    }
+
+    private var imagePreviewAnimation: Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.18)
+            : .smooth(duration: 0.42)
+    }
+
     private func mediaPanelHeight(for availableHeight: CGFloat) -> CGFloat {
         let desiredHeight = max(availableHeight * 0.6, 480)
         return min(min(desiredHeight, max(availableHeight - 24, 0)), 560)
@@ -1319,13 +1644,17 @@ struct TextConversationView: View {
         replacesPendingMessage: Bool = false
     ) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty,
+        let attachments = replacesPendingMessage ? [] : pendingImageAttachments
+        guard !text.isEmpty || !attachments.isEmpty,
               !isStreaming,
               !isDiscardingTurn,
               replacesPendingMessage || !composerFrame.isEmpty else { return }
 
         do {
-            let configuration = try AISettingsStore.configuration()
+            let configuration = try configurationProvider()
+            let imageAttachments = try attachments.map {
+                try $0.encodedChatAttachment()
+            }
             let outgoing: OutgoingMessageTransition?
             if replacesPendingMessage {
                 if !isInitialTransitionComplete {
@@ -1336,13 +1665,26 @@ struct TextConversationView: View {
                 let staged = OutgoingMessageTransition(
                     id: UUID(),
                     text: text,
+                    imageAttachments: imageAttachments,
+                    composerText: text,
+                    composerAttachments: attachments,
                     createdAt: Date(),
                     presentation: isScrolledToBottom
                         ? .messageFlight
                         : .scrollToBottom
                 )
-                outgoingTransition = staged
-                flightDestinationReadyID = nil
+                var stagingTransaction = Transaction(animation: nil)
+                stagingTransaction.disablesAnimations = true
+                withTransaction(stagingTransaction) {
+                    outgoingTransition = staged
+                    flightDestinationReadyID = nil
+                    messageFlightComposerReservation = staged.presentation == .messageFlight
+                        ? MessageFlightComposerReservation(
+                            id: staged.id,
+                            height: composerFrame.height
+                        )
+                        : nil
+                }
                 assistantPresentation.block(id: staged.id)
                 outgoing = staged
 
@@ -1351,13 +1693,15 @@ struct TextConversationView: View {
                     conversationID: conversation?.id ?? UUID(),
                     role: .user,
                     content: staged.text,
-                    createdAt: staged.createdAt
+                    createdAt: staged.createdAt,
+                    imageAttachments: staged.imageAttachments
                 )
                 var transaction = Transaction(animation: nil)
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
                     if staged.presentation == .scrollToBottom {
                         draft = ""
+                        pendingImageAttachments = []
                         pendingCatchUpMessageID = staged.id
                     }
                     messages.append(provisionalMessage)
@@ -1370,6 +1714,7 @@ struct TextConversationView: View {
                     onMessageFlightRequested(MessageFlightRequest(
                         id: staged.id,
                         text: staged.text,
+                        imageAttachments: staged.imageAttachments,
                         createdAt: staged.createdAt,
                         sourceFrame: composerFrame,
                         showsOverlayWhilePreparing: false
@@ -1398,6 +1743,7 @@ struct TextConversationView: View {
                 }
                 await performSend(
                     text,
+                    imageAttachments: imageAttachments,
                     configuration: configuration,
                     turn: turn,
                     outgoing: outgoing
@@ -1421,6 +1767,7 @@ struct TextConversationView: View {
 
     private func performSend(
         _ text: String,
+        imageAttachments: [ChatImageAttachment],
         configuration: AIConfiguration,
         turn: ActiveTextTurn,
         outgoing: OutgoingMessageTransition?
@@ -1439,7 +1786,7 @@ struct TextConversationView: View {
                 activeConversation = conversation
             } else {
                 let created = try await database.createConversation(
-                    title: conversationTitle(from: text)
+                    title: text.isEmpty ? "图片对话" : conversationTitle(from: text)
                 )
                 conversation = created
                 activeConversation = created
@@ -1452,7 +1799,8 @@ struct TextConversationView: View {
                 content: text,
                 createdAt: turn.isInitialMessage
                     ? initialMessageDate
-                    : outgoing?.createdAt ?? Date()
+                    : outgoing?.createdAt ?? Date(),
+                imageAttachments: imageAttachments
             )
             try await database.saveChatMessage(userMessage)
             presentUserMessage(
@@ -1465,6 +1813,7 @@ struct TextConversationView: View {
 
             var requestMessages: [AIRequestMessage] = []
             let prompt = configuration.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            let memoryInstructions = (try? await memoryStore.promptContext()) ?? ""
             let toolInstructions = """
                 \(PlantDataToolCatalog.usageInstructions)
 
@@ -1472,12 +1821,21 @@ struct TextConversationView: View {
                 """
             requestMessages.append(AIRequestMessage(
                 role: .system,
-                content: [prompt, plantBinding.modelInstructions, toolInstructions]
+                content: [
+                    prompt,
+                    plantBinding.modelInstructions,
+                    memoryInstructions,
+                    toolInstructions
+                ]
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n\n")
             ))
-            requestMessages.append(contentsOf: messages.map {
-                AIRequestMessage(role: $0.role, content: $0.content)
+            requestMessages.append(contentsOf: messages.map { message in
+                AIRequestMessage(
+                    role: message.role,
+                    content: message.id == userMessage.id ? text : message.content,
+                    imageDataURLs: message.imageAttachments.map(\.dataURL)
+                )
             })
 
             streamingAssistantState.begin(ChatMessage(
@@ -1614,12 +1972,21 @@ struct TextConversationView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             messages.removeAll { $0.id == outgoing.id }
-            draft = outgoing.text
+            if trimmedDraft.isEmpty {
+                draft = outgoing.composerText
+            }
+            let pendingIDs = Set(pendingImageAttachments.map(\.id))
+            pendingImageAttachments = outgoing.composerAttachments.filter {
+                !pendingIDs.contains($0.id)
+            } + pendingImageAttachments
             if pendingCatchUpMessageID == outgoing.id {
                 pendingCatchUpMessageID = nil
             }
             if flightDestinationReadyID == outgoing.id {
                 flightDestinationReadyID = nil
+            }
+            if messageFlightComposerReservation?.id == outgoing.id {
+                messageFlightComposerReservation = nil
             }
             outgoingTransition = nil
         }
@@ -1684,7 +2051,11 @@ struct TextConversationView: View {
             if outgoingTransition?.id == turn.userMessageID {
                 outgoingTransition = nil
             }
+            if messageFlightComposerReservation?.id == turn.userMessageID {
+                messageFlightComposerReservation = nil
+            }
             draft = ""
+            pendingImageAttachments = []
         }
     }
 
@@ -1720,6 +2091,20 @@ struct TextConversationView: View {
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 flightDestinationReadyID = id
+            }
+        }
+    }
+
+    private func releaseMessageFlightComposerReservation(for id: UUID) {
+        Task { @MainActor in
+            // First let ContentView remove the overlay and reveal the real
+            // bubble. The compact empty composer can take over next frame.
+            await Task.yield()
+            guard messageFlightComposerReservation?.id == id else { return }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                messageFlightComposerReservation = nil
             }
         }
     }
@@ -1793,6 +2178,12 @@ struct TextConversationView: View {
     }
 
     private func showError(_ error: Error) {
+        if let clientError = error as? AIClientError,
+           case .unsupportedImageInput = clientError {
+            errorTitle = "无法发送图片"
+        } else {
+            errorTitle = "对话失败"
+        }
         errorMessage = error.localizedDescription
         isShowingError = true
     }
@@ -1801,6 +2192,9 @@ struct TextConversationView: View {
 private struct OutgoingMessageTransition: Equatable {
     let id: UUID
     let text: String
+    let imageAttachments: [ChatImageAttachment]
+    let composerText: String
+    let composerAttachments: [ConversationImageAttachment]
     let createdAt: Date
     let presentation: OutgoingMessagePresentation
     var hasCompletedFlight: Bool
@@ -1809,15 +2203,26 @@ private struct OutgoingMessageTransition: Equatable {
     init(
         id: UUID,
         text: String,
+        imageAttachments: [ChatImageAttachment],
+        composerText: String,
+        composerAttachments: [ConversationImageAttachment],
         createdAt: Date,
         presentation: OutgoingMessagePresentation
     ) {
         self.id = id
         self.text = text
+        self.imageAttachments = imageAttachments
+        self.composerText = composerText
+        self.composerAttachments = composerAttachments
         self.createdAt = createdAt
         self.presentation = presentation
         hasCompletedFlight = presentation != .messageFlight
     }
+}
+
+private struct MessageFlightComposerReservation: Equatable {
+    let id: UUID
+    let height: CGFloat
 }
 
 private struct ActiveTextTurn: Equatable {
@@ -2029,29 +2434,36 @@ private struct InitialTextMessageBubble: View {
             } else {
                 UserBubbleFlightPlaceholder(
                     text: text,
+                    imageAttachments: [],
                     createdAt: createdAt,
                     destinationID: transitionID
                 )
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("我的消息")
     }
 }
 
 struct ChatMessageBubble: View {
     let message: ChatMessage
+    let activeImagePreviewSourceID: String?
+    let onImagePreview: ConversationImagePreviewAction?
     let flightDestinationID: UUID?
     let reportsFlightDestination: Bool
     let isFlightComplete: Bool
 
     init(
         message: ChatMessage,
+        activeImagePreviewSourceID: String? = nil,
+        onImagePreview: ConversationImagePreviewAction? = nil,
         flightDestinationID: UUID? = nil,
         reportsFlightDestination: Bool = true,
         isFlightComplete: Bool = true
     ) {
         self.message = message
+        self.activeImagePreviewSourceID = activeImagePreviewSourceID
+        self.onImagePreview = onImagePreview
         self.flightDestinationID = flightDestinationID
         self.reportsFlightDestination = reportsFlightDestination
         self.isFlightComplete = isFlightComplete
@@ -2066,6 +2478,7 @@ struct ChatMessageBubble: View {
             if let flightDestinationID, !isFlightComplete {
                 UserBubbleFlightPlaceholder(
                     text: message.content,
+                    imageAttachments: message.imageAttachments,
                     createdAt: message.createdAt,
                     destinationID: reportsFlightDestination
                         ? flightDestinationID
@@ -2075,6 +2488,9 @@ struct ChatMessageBubble: View {
                 ChatBubbleSurface(role: message.role) {
                     ChatBubblePayload(
                         text: message.content,
+                        imageAttachments: message.imageAttachments,
+                        activeImagePreviewSourceID: activeImagePreviewSourceID,
+                        onImagePreview: onImagePreview,
                         createdAt: message.createdAt,
                         toolInvocations: message.role == .assistant
                             ? message.toolInvocations
@@ -2087,19 +2503,21 @@ struct ChatMessageBubble: View {
                 Spacer(minLength: 48)
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(message.role == .user ? "我的消息" : "植物回复")
     }
 }
 
 private struct UserBubbleFlightPlaceholder: View {
     let text: String
+    let imageAttachments: [ChatImageAttachment]
     let createdAt: Date
     let destinationID: UUID?
 
     var body: some View {
         ChatBubblePayload(
             text: text,
+            imageAttachments: imageAttachments,
             createdAt: createdAt
         )
         .padding(.leading, 14)
@@ -2113,26 +2531,42 @@ private struct UserBubbleFlightPlaceholder: View {
 
 private struct ChatBubblePayload: View {
     let text: String
+    let imageAttachments: [ChatImageAttachment]
+    let activeImagePreviewSourceID: String?
+    let onImagePreview: ConversationImagePreviewAction?
     let createdAt: Date
     let toolInvocations: [ToolInvocation]
 
     init(
         text: String,
+        imageAttachments: [ChatImageAttachment] = [],
+        activeImagePreviewSourceID: String? = nil,
+        onImagePreview: ConversationImagePreviewAction? = nil,
         createdAt: Date,
         toolInvocations: [ToolInvocation] = []
     ) {
         self.text = text
+        self.imageAttachments = imageAttachments
+        self.activeImagePreviewSourceID = activeImagePreviewSourceID
+        self.onImagePreview = onImagePreview
         self.createdAt = createdAt
         self.toolInvocations = toolInvocations
     }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            Text(text)
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.leading)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .trailing, spacing: 7) {
+            if !imageAttachments.isEmpty {
+                ChatBubbleImageGrid(
+                    attachments: imageAttachments,
+                    activePreviewSourceID: activeImagePreviewSourceID,
+                    onPreview: onImagePreview
+                )
+            }
+
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                SelectableMessageText(text: text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if !toolInvocations.isEmpty {
                 ToolInvocationDisclosure(invocations: toolInvocations)
@@ -2144,6 +2578,199 @@ private struct ChatBubblePayload: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// UIKit owns the selection gestures and edit menu here. SwiftUI's
+/// `textSelection` is not reliable inside the conversation's nested glass and
+/// scrolling hierarchy on a physical device.
+private struct SelectableMessageText: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = false
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textColor = .label
+        textView.adjustsFontForContentSizeCategory = true
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textColor = .label
+        if textView.text != text {
+            textView.text = text
+        }
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView textView: UITextView,
+        context: Context
+    ) -> CGSize? {
+        guard let proposedWidth = proposal.width,
+              proposedWidth > 0,
+              let font = textView.font else {
+            return nil
+        }
+
+        let textBounds = (textView.text as NSString).boundingRect(
+            with: CGSize(
+                width: proposedWidth,
+                height: CGFloat.greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil
+        )
+        let fittedWidth = min(proposedWidth, max(ceil(textBounds.width), 1))
+        let fittedSize = textView.sizeThatFits(CGSize(
+            width: fittedWidth,
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        return CGSize(width: fittedWidth, height: ceil(fittedSize.height))
+    }
+}
+
+private struct ChatBubbleImageGrid: View {
+    let attachments: [ChatImageAttachment]
+    let activePreviewSourceID: String?
+    let onPreview: ConversationImagePreviewAction?
+
+    private var images: [(attachment: ChatImageAttachment, image: UIImage)] {
+        attachments.compactMap { attachment in
+            guard let image = UIImage(data: attachment.data) else { return nil }
+            return (attachment, image)
+        }
+    }
+
+    var body: some View {
+        Group {
+            if images.count > 1 {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: ConversationAttachmentLayout.itemSpacing) {
+                        imageButtons
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .frame(height: ConversationAttachmentLayout.itemSide)
+            } else if let item = images.first {
+                imageButton(item)
+            }
+        }
+        .frame(height: ConversationAttachmentLayout.itemSide)
+    }
+
+    @ViewBuilder
+    private var imageButtons: some View {
+        ForEach(images, id: \.attachment.id) { item in
+            imageButton(item)
+        }
+    }
+
+    private func imageButton(
+        _ item: (attachment: ChatImageAttachment, image: UIImage)
+    ) -> some View {
+        let sourceID = "bubble:\(item.attachment.id)"
+
+        return GeometryReader { proxy in
+            Button {
+                onPreview?(
+                    item.image,
+                    sourceID,
+                    proxy.frame(in: .global)
+                )
+            } label: {
+                Group {
+                    if activePreviewSourceID == sourceID {
+                        Color.clear
+                    } else {
+                        Image(uiImage: item.image)
+                            .resizable()
+                            .scaledToFill()
+                    }
+                }
+                .frame(
+                    width: ConversationAttachmentLayout.itemSide,
+                    height: ConversationAttachmentLayout.itemSide
+                )
+                .clipShape(RoundedRectangle(
+                    cornerRadius: ConversationAttachmentLayout.cornerRadius,
+                    style: .continuous
+                ))
+            }
+            .buttonStyle(.plain)
+            .allowsHitTesting(onPreview != nil)
+            .accessibilityLabel("预览图片")
+        }
+        .frame(
+            width: ConversationAttachmentLayout.itemSide,
+            height: ConversationAttachmentLayout.itemSide
+        )
+    }
+}
+
+struct MessageFlightPayload: View {
+    let text: String
+    let imageAttachments: [ChatImageAttachment]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if !imageAttachments.isEmpty {
+                MessageFlightImageGrid(attachments: imageAttachments)
+            }
+
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(text)
+                    .foregroundStyle(.primary)
+                    .lineLimit(5)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct MessageFlightImageGrid: View {
+    let attachments: [ChatImageAttachment]
+
+    var body: some View {
+        let images = attachments.compactMap { UIImage(data: $0.data) }
+        Group {
+            if images.count > 1 {
+                HStack(spacing: ConversationAttachmentLayout.itemSpacing) {
+                    ForEach(Array(images.enumerated()), id: \.offset) { _, image in
+                        imageView(image)
+                    }
+                }
+            } else if let image = images.first {
+                imageView(image)
+            }
+        }
+        .frame(height: ConversationAttachmentLayout.itemSide)
+    }
+
+    private func imageView(_ image: UIImage) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(
+                width: ConversationAttachmentLayout.itemSide,
+                height: ConversationAttachmentLayout.itemSide
+            )
+            .clipShape(RoundedRectangle(
+                cornerRadius: ConversationAttachmentLayout.cornerRadius,
+                style: .continuous
+            ))
     }
 }
 
@@ -2931,8 +3558,268 @@ private struct TextConversationBottomBarPreview: View {
     }
 }
 
+@MainActor
+struct TextConversationImageInteractionPreview: View {
+    private let database: PlantDatabase
+    private let memoryStore: PlantMemoryStore
+    private let toolExecutor: PlantDataToolExecutor
+    private let composerAttachment: ConversationImageAttachment
+    private let historyAttachment: ConversationImageAttachment
+
+    @State private var conversation: AIConversation?
+    @State private var messages: [ChatMessage] = []
+    @State private var preparationError: String?
+    @State private var activeFlight: ActiveMessageFlight?
+    @State private var startedFlightID: UUID?
+    @State private var completedFlightID: UUID?
+    @State private var destinations: [UUID: CGRect] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init() {
+        let previewID = UUID().uuidString
+        let databasePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plant-talk-preview-\(previewID).sqlite")
+            .path
+        let database = try! PlantDatabase(path: databasePath)
+        let image = Self.makePlantPreviewImage()
+
+        self.database = database
+        memoryStore = PlantMemoryStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("plant-talk-preview-memory-\(previewID).json")
+        )
+        toolExecutor = PlantDataToolExecutor(
+            database: database,
+            deviceIDProvider: { nil },
+            currentReadingProvider: { nil }
+        )
+        composerAttachment = ConversationImageAttachment(
+            id: "preview-composer-\(previewID)",
+            image: image
+        )
+        historyAttachment = ConversationImageAttachment(
+            id: "preview-history-\(previewID)",
+            image: image
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            if let conversation {
+                TextConversationView(
+                    database: database,
+                    client: Self.fixedResponseClient,
+                    memoryStore: memoryStore,
+                    toolExecutor: toolExecutor,
+                    plantBinding: .unbound(source: .noKnownPlant),
+                    initialMessage: "",
+                    initialMessageID: UUID(
+                        uuidString: "00000000-0000-0000-0000-000000000901"
+                    )!,
+                    initialMessageDate: Date(timeIntervalSince1970: 1_788_800_000),
+                    resumedConversation: conversation,
+                    resumedMessages: messages,
+                    isInitialTransitionComplete: true,
+                    completedMessageFlightID: completedFlightID,
+                    startedMessageFlightID: startedFlightID,
+                    initialPendingImageAttachments: [composerAttachment],
+                    configurationProvider: { Self.previewConfiguration },
+                    onMessageFlightRequested: beginFlight,
+                    onMessageFlightCancelled: cancelFlight,
+                    onHome: {}
+                )
+                .id(conversation.id)
+            } else if let preparationError {
+                ContentUnavailableView(
+                    "Preview 准备失败",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(preparationError)
+                )
+            } else {
+                ProgressView("正在准备离线对话…")
+            }
+
+            if let activeFlight,
+               activeFlight.hasStarted
+                || activeFlight.request.showsOverlayWhilePreparing {
+                MessageFlightOverlay(flight: activeFlight)
+                    .allowsHitTesting(false)
+                    .zIndex(100)
+            }
+        }
+        .coordinateSpace(name: messageFlightCoordinateSpace)
+        .onPreferenceChange(MessageFlightDestinationPreferenceKey.self) { newValue in
+            destinations = newValue
+            startFlightIfPossible()
+        }
+        .task { await prepareConversationIfNeeded() }
+    }
+
+    private func prepareConversationIfNeeded() async {
+        guard conversation == nil, preparationError == nil else { return }
+        do {
+            let conversation = try await database.createConversation(
+                title: "图片交互 Preview"
+            )
+            let storedImage = try historyAttachment.encodedChatAttachment()
+            let baseDate = Date(timeIntervalSince1970: 1_788_800_000)
+            let seedMessages = [
+                ChatMessage(
+                    id: UUID(),
+                    conversationID: conversation.id,
+                    role: .user,
+                    content: "请看看这片叶子的状态。",
+                    createdAt: baseDate,
+                    imageAttachments: [storedImage]
+                ),
+                ChatMessage(
+                    id: UUID(),
+                    conversationID: conversation.id,
+                    role: .assistant,
+                    content: "这是一段离线 Preview 的固定回答。你可以长按并任意选择其中的文字，然后复制；也可以点击上方图片检查浮层预览。",
+                    createdAt: baseDate.addingTimeInterval(30)
+                )
+            ]
+            for message in seedMessages {
+                try await database.saveChatMessage(message)
+            }
+            messages = try await database.chatMessages(conversationID: conversation.id)
+            self.conversation = conversation
+        } catch {
+            preparationError = error.localizedDescription
+        }
+    }
+
+    private func beginFlight(_ request: MessageFlightRequest) {
+        guard !request.sourceFrame.isEmpty else { return }
+        startedFlightID = nil
+        completedFlightID = nil
+        activeFlight = ActiveMessageFlight(
+            request: request,
+            currentFrame: request.sourceFrame
+        )
+        startFlightIfPossible()
+    }
+
+    private func startFlightIfPossible() {
+        guard var flight = activeFlight,
+              !flight.hasStarted,
+              let destination = destinations[flight.request.id],
+              !destination.isEmpty else { return }
+        let id = flight.request.id
+        flight.hasStarted = true
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            activeFlight = flight
+            startedFlightID = id
+        }
+
+        Task { @MainActor in
+            await Task.yield()
+            guard activeFlight?.request.id == id else { return }
+            withAnimation(
+                reduceMotion ? nil : .smooth(duration: 0.32),
+                completionCriteria: .logicallyComplete
+            ) {
+                activeFlight?.currentFrame = destination
+                activeFlight?.progress = 1
+            } completion: {
+                completeFlight(id)
+            }
+        }
+    }
+
+    private func completeFlight(_ id: UUID) {
+        guard activeFlight?.request.id == id else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            startedFlightID = id
+            completedFlightID = id
+            activeFlight = nil
+        }
+    }
+
+    private func cancelFlight(_ id: UUID) {
+        guard activeFlight?.request.id == id || completedFlightID == id else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            activeFlight = nil
+            startedFlightID = nil
+            if completedFlightID == id {
+                completedFlightID = nil
+            }
+        }
+    }
+
+    private static let previewConfiguration = AIConfiguration(
+        baseURL: URL(string: "https://preview.invalid/v1")!,
+        model: "offline-preview-model",
+        systemPrompt: "",
+        apiKey: "preview-only"
+    )
+
+    private static let fixedResponseClient = OpenAICompatibleClient { _, _, _ in
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                try? await Task.sleep(for: .milliseconds(280))
+                guard !Task.isCancelled else { return }
+                continuation.yield(.textDelta(
+                    "这是写死的离线模型回答：图片已经随消息进入聊天气泡，"
+                ))
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
+                continuation.yield(.textDelta(
+                    "输入框也已在飞行动画开始时正常清空。长按这段文字可以任意选择并复制。"
+                ))
+                continuation.yield(.finished(reason: "stop"))
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static func makePlantPreviewImage() -> UIImage {
+        let size = CGSize(width: 900, height: 1_200)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor(red: 0.08, green: 0.24, blue: 0.16, alpha: 1).setFill()
+            context.cgContext.fill(CGRect(origin: .zero, size: size))
+
+            let leafRect = CGRect(
+                x: size.width * 0.18,
+                y: size.height * 0.15,
+                width: size.width * 0.64,
+                height: size.height * 0.7
+            )
+            let leaf = UIBezierPath(
+                roundedRect: leafRect,
+                cornerRadius: min(leafRect.width, leafRect.height) * 0.48
+            )
+            UIColor(red: 0.31, green: 0.72, blue: 0.42, alpha: 1).setFill()
+            leaf.fill()
+
+            let stem = UIBezierPath()
+            stem.move(to: CGPoint(x: size.width * 0.5, y: size.height * 0.76))
+            stem.addLine(to: CGPoint(x: size.width * 0.5, y: size.height * 0.28))
+            UIColor.white.withAlphaComponent(0.72).setStroke()
+            stem.lineWidth = size.width * 0.018
+            stem.lineCapStyle = .round
+            stem.stroke()
+        }
+    }
+}
+
 #Preview("Text Conversation · 底部输入栏") {
     TextConversationBottomBarPreview()
+}
+
+#Preview("Text Conversation · 图片交互（离线固定回复）") {
+    TextConversationImageInteractionPreview()
 }
 
 extension View {

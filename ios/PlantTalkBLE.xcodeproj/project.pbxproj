@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0A4F39C0D5A84C8DB8D44710 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */; };
 		0D46B81E925EC66430B5892E /* PlantArtworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */; };
 		11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */; };
 		1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */; };
@@ -41,6 +42,7 @@
 		DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */; };
 		EDCE489BC5ABA6899AEBC3D6 /* AIConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */; };
 		EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */; };
+		F0A000000000000000000002 /* PlantMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0A000000000000000000001 /* PlantMemory.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,6 +56,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		05099F394FC182A10A30211A /* PlantDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabase.swift; sourceTree = "<group>"; };
 		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
 		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
@@ -90,6 +93,7 @@
 		F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DayDetailView.swift; sourceTree = "<group>"; };
 		F48D7300B5B0307794AED6BE /* AISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsView.swift; sourceTree = "<group>"; };
 		F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimationDemoView.swift; sourceTree = "<group>"; };
+		F0A000000000000000000001 /* PlantMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantMemory.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -107,6 +111,7 @@
 		30C2000207D7393B0B4C4455 /* PlantTalkBLE */ = {
 			isa = PBXGroup;
 			children = (
+				0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */,
 				7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */,
 				F48D7300B5B0307794AED6BE /* AISettingsView.swift */,
 				F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */,
@@ -124,6 +129,7 @@
 				724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */,
 				BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */,
 				05099F394FC182A10A30211A /* PlantDatabase.swift */,
+				F0A000000000000000000001 /* PlantMemory.swift */,
 				B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */,
 				D6237A24CE1893E70859F6D7 /* PlantReading.swift */,
 				917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */,
@@ -264,6 +270,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0A4F39C0D5A84C8DB8D44710 /* Assets.xcassets in Resources */,
 				95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -292,6 +299,7 @@
 				DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */,
 				753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */,
 				97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */,
+				F0A000000000000000000002 /* PlantMemory.swift in Sources */,
 				2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */,
 				EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */,
 				D38300DF3DB8C01960656B0D /* QwenRealtimeConversation.swift in Sources */,
@@ -348,7 +356,7 @@
 		778EE35AC042DC2AABAF9549 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = ZT3X6444JT;
@@ -487,7 +495,7 @@
 		AD9C675FAFE16D57C1F18EC8 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = ZT3X6444JT;

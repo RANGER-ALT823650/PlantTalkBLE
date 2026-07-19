@@ -3,6 +3,7 @@ import UIKit
 
 struct AppSettingsView: View {
     let database: PlantDatabase
+    let memoryStore: PlantMemoryStore
     @AppStorage("appTheme") private var appTheme: AppTheme = .blue
     @State private var isDeletingHistory = false
     @State private var historyAlert: HistoryAlert?
@@ -37,7 +38,7 @@ struct AppSettingsView: View {
                 .pickerStyle(.menu)
 
                 NavigationLink {
-                    AISettingsView()
+                    AISettingsView(memoryStore: memoryStore)
                 } label: {
                     Label("大模型设置", systemImage: "cpu")
                 }
@@ -60,7 +61,7 @@ struct AppSettingsView: View {
             case .deleteConfirmation:
                 Alert(
                     title: Text("删除全部历史记录？"),
-                    message: Text("全部传感器历史、文字对话和实时语音会话都会被永久删除。"),
+                    message: Text("全部传感器历史、文字对话、实时语音会话和长期记忆都会被永久删除。"),
                     primaryButton: .destructive(Text("全部删除")) {
                         deleteAllHistory()
                     },
@@ -81,6 +82,7 @@ struct AppSettingsView: View {
         Task {
             do {
                 try await database.deleteAllHistory()
+                try await memoryStore.clear()
                 historyAlert = .result("全部历史记录已删除。")
             } catch {
                 historyAlert = .result("删除失败：\(error.localizedDescription)")
@@ -92,6 +94,8 @@ struct AppSettingsView: View {
 
 @MainActor
 struct AISettingsView: View {
+    let memoryStore: PlantMemoryStore
+
     @State private var baseURL: String
     @State private var model: String
     @State private var systemPrompt: String
@@ -186,7 +190,8 @@ struct AISettingsView: View {
         .init(id: "Chloe", title: "思怡 Chloe")
     ]
 
-    init() {
+    init(memoryStore: PlantMemoryStore) {
+        self.memoryStore = memoryStore
         _baseURL = State(initialValue: AISettingsStore.baseURLString)
         _model = State(initialValue: AISettingsStore.model)
         _systemPrompt = State(initialValue: AISettingsStore.systemPrompt)
@@ -210,6 +215,18 @@ struct AISettingsView: View {
                         clearLegacySharedAPIKey()
                     }
                 }
+            }
+
+            Section {
+                NavigationLink {
+                    MemoryDetailView(memoryStore: memoryStore)
+                } label: {
+                    Label("记忆", systemImage: "brain.head.profile")
+                }
+            } header: {
+                Text("长期记忆")
+            } footer: {
+                Text("查看并编辑用户画像、植物档案、重要事件和待跟进事项。每条记录都会显示最近更新时间。")
             }
 
             Section {
@@ -545,6 +562,9 @@ struct AISettingsView: View {
 
 #Preview {
     NavigationStack {
-        AISettingsView()
+        AISettingsView(memoryStore: PlantMemoryStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("plant-memory-preview.json")
+        ))
     }
 }

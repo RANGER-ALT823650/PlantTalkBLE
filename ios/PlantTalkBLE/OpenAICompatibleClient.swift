@@ -12,23 +12,36 @@ enum AIRequestRole: String, Codable, Sendable {
 struct AIRequestMessage: Encodable, Equatable, Sendable {
     let role: AIRequestRole
     let content: String?
+    let imageDataURLs: [String]
     let toolCalls: [AIModelToolCall]?
     let toolCallID: String?
 
-    init(role: AIRequestRole, content: String? = nil, toolCalls: [AIModelToolCall]? = nil, toolCallID: String? = nil) {
+    init(
+        role: AIRequestRole,
+        content: String? = nil,
+        imageDataURLs: [String] = [],
+        toolCalls: [AIModelToolCall]? = nil,
+        toolCallID: String? = nil
+    ) {
         self.role = role
         self.content = content
+        self.imageDataURLs = imageDataURLs
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
     }
 
-    init(role: ChatRole, content: String) {
+    init(
+        role: ChatRole,
+        content: String,
+        imageDataURLs: [String] = []
+    ) {
         switch role {
         case .system: self.role = .system
         case .user: self.role = .user
         case .assistant: self.role = .assistant
         }
         self.content = content
+        self.imageDataURLs = imageDataURLs
         toolCalls = nil
         toolCallID = nil
     }
@@ -37,6 +50,58 @@ struct AIRequestMessage: Encodable, Equatable, Sendable {
         case role, content
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+
+        if imageDataURLs.isEmpty {
+            try container.encodeIfPresent(content, forKey: .content)
+        } else {
+            var contentContainer = container.nestedUnkeyedContainer(forKey: .content)
+            if let content,
+               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try contentContainer.encode(AIRequestContentPart.text(content))
+            }
+            for dataURL in imageDataURLs {
+                try contentContainer.encode(AIRequestContentPart.imageURL(dataURL))
+            }
+        }
+
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        try container.encodeIfPresent(toolCallID, forKey: .toolCallID)
+    }
+}
+
+private enum AIRequestContentPart: Encodable {
+    case text(String)
+    case imageURL(String)
+
+    enum CodingKeys: String, CodingKey {
+        case type, text
+        case imageURL = "image_url"
+    }
+
+    enum ImageURLCodingKeys: String, CodingKey {
+        case url, detail
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .imageURL(let dataURL):
+            try container.encode("image_url", forKey: .type)
+            var imageContainer = container.nestedContainer(
+                keyedBy: ImageURLCodingKeys.self,
+                forKey: .imageURL
+            )
+            try imageContainer.encode(dataURL, forKey: .url)
+            try imageContainer.encode("auto", forKey: .detail)
+        }
     }
 }
 
@@ -74,6 +139,9 @@ struct OpenAICompatibleClient: Sendable {
             AsyncThrowingStream { continuation in
                 let task = Task {
                     do {
+                        let containsImageInput = messages.contains {
+                            !$0.imageDataURLs.isEmpty
+                        }
                         var request = URLRequest(url: completionURL(baseURL: configuration.baseURL))
                         request.httpMethod = "POST"
                         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -96,9 +164,19 @@ struct OpenAICompatibleClient: Sendable {
                                 body.append(byte)
                                 if body.count >= 65_536 { break }
                             }
+                            let message = serverErrorMessage(from: body)
+                            if containsImageInput,
+                               indicatesUnsupportedImageInput(
+                                   statusCode: httpResponse.statusCode,
+                                   message: message
+                               ) {
+                                throw AIClientError.unsupportedImageInput(
+                                    model: configuration.model
+                                )
+                            }
                             throw AIClientError.http(
                                 statusCode: httpResponse.statusCode,
-                                message: serverErrorMessage(from: body)
+                                message: message
                             )
                         }
 
@@ -112,6 +190,12 @@ struct OpenAICompatibleClient: Sendable {
 
                             let chunk = try JSONDecoder().decode(ChatCompletionChunk.self, from: data)
                             if let message = chunk.error?.message {
+                                if containsImageInput,
+                                   indicatesUnsupportedImageInput(message: message) {
+                                    throw AIClientError.unsupportedImageInput(
+                                        model: configuration.model
+                                    )
+                                }
                                 throw AIClientError.server(message)
                             }
                             for choice in chunk.choices {
@@ -152,6 +236,28 @@ struct OpenAICompatibleClient: Sendable {
         return baseURL
             .appendingPathComponent("chat", isDirectory: true)
             .appendingPathComponent("completions", isDirectory: false)
+    }
+
+    static func indicatesUnsupportedImageInput(
+        statusCode: Int? = nil,
+        message: String?
+    ) -> Bool {
+        if let statusCode, ![400, 415, 422].contains(statusCode) {
+            return false
+        }
+        guard let message else { return false }
+        let text = message.lowercased()
+        let imageMarkers = [
+            "image", "vision", "multimodal", "image_url",
+            "图片", "图像", "视觉", "多模态"
+        ]
+        let unsupportedMarkers = [
+            "not support", "doesn't support", "does not support",
+            "unsupported", "text-only", "text only", "only text",
+            "invalid content type", "不支持", "仅支持文本", "只支持文本"
+        ]
+        return imageMarkers.contains(where: text.contains)
+            && unsupportedMarkers.contains(where: text.contains)
     }
 
     private static func serverErrorMessage(from data: Data) -> String? {
@@ -291,6 +397,7 @@ enum AIClientError: LocalizedError {
     case emptyResponse
     case invalidToolCall
     case toolRoundLimitExceeded
+    case unsupportedImageInput(model: String)
 
     var errorDescription: String? {
         switch self {
@@ -307,6 +414,8 @@ enum AIClientError: LocalizedError {
             "模型返回了不完整的工具调用。"
         case .toolRoundLimitExceeded:
             "模型连续请求工具的次数过多，已停止本次查询。"
+        case .unsupportedImageInput(let model):
+            "模型服务确认“\(model)”不支持图片输入，请切换为支持视觉输入的模型后再发送。"
         }
     }
 }

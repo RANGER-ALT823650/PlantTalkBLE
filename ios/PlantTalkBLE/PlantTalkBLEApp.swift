@@ -50,30 +50,61 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
 @main
 struct PlantTalkBLEApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appTheme") private var appTheme: AppTheme = .blue
     @State private var bluetooth: PlantBluetoothManager
     private let database: PlantDatabase
-    private let aiClient = OpenAICompatibleClient.live()
+    private let aiClient: OpenAICompatibleClient
+    private let memoryStore: PlantMemoryStore
+    private let memoryOrganizer: PlantMemoryLaunchOrganizer
 
     init() {
         do {
             let database = try PlantDatabase.makeDefault()
+            let aiClient = OpenAICompatibleClient.live()
+            let memoryStore = try PlantMemoryStore.makeDefault()
             self.database = database
+            self.aiClient = aiClient
+            self.memoryStore = memoryStore
+            self.memoryOrganizer = PlantMemoryLaunchOrganizer(
+                database: database,
+                memoryStore: memoryStore,
+                client: aiClient
+            )
             _bluetooth = State(initialValue: PlantBluetoothManager(database: database))
         } catch {
-            fatalError("无法初始化 Plant Talk 数据库：\(error.localizedDescription)")
+            fatalError("无法初始化 Plant Talk：\(error.localizedDescription)")
         }
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(
-                bluetooth: bluetooth,
-                database: database,
-                aiClient: aiClient
-            )
-            .tint(appTheme.color)
-            .accentColor(appTheme.color)
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--image-preview-harness") {
+                TextConversationImageInteractionPreview()
+                    .tint(appTheme.color)
+                    .accentColor(appTheme.color)
+            } else {
+                liveRootView
+            }
+#else
+            liveRootView
+#endif
+        }
+    }
+
+    private var liveRootView: some View {
+        ContentView(
+            bluetooth: bluetooth,
+            database: database,
+            aiClient: aiClient,
+            memoryStore: memoryStore
+        )
+        .tint(appTheme.color)
+        .accentColor(appTheme.color)
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await memoryOrganizer.organizeWhenActive()
         }
     }
 }
