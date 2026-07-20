@@ -7,13 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0A4F39C0D5A84C8DB8D44710 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */; };
 		0D46B81E925EC66430B5892E /* PlantArtworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */; };
 		11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */; };
 		1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */; };
 		1AD5193889E6E935D13C3336 /* RealtimeAudioIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */; };
 		1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */; };
 		2276E7EBC1FE747D071C6414 /* CameraCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 600BD03E36121532166372D4 /* CameraCaptureView.swift */; };
+		2935B79F7D1F92540F38C87E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 477FF261A878ED83CBA00B4F /* Assets.xcassets */; };
 		2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6237A24CE1893E70859F6D7 /* PlantReading.swift */; };
 		2F526B588BA296AB751A2BBC /* SensorChartSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6EC131A2D56E78478954626 /* SensorChartSheet.swift */; };
 		4394C6727D115B590FF2A08E /* PlantConversationBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */; };
@@ -27,6 +27,7 @@
 		7B5D40C2BEEC751E7288F985 /* RealtimeConversationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */; };
 		7E12548C2451BB279E1246B9 /* HistoryTransferProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */; };
 		808EC7CEA736C9B0C18E8E57 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEFF091310D4BDE120ECE51 /* DetailView.swift */; };
+		9358ABC597AD97A477630834 /* summary.md in Resources */ = {isa = PBXBuildFile; fileRef = F82B11E7789415F8CDA49B9A /* summary.md */; };
 		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
 		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
 		A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */; };
@@ -40,9 +41,9 @@
 		D9359F9D5D564D1A7B3E19B0 /* OpenAICompatibleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */; };
 		DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFB78923A16E617E7CFEE47A /* TextConversationView.swift */; };
 		DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */; };
+		E16609BD95D4F86AA9A009DA /* PlantMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */; };
 		EDCE489BC5ABA6899AEBC3D6 /* AIConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */; };
 		EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */; };
-		F0A000000000000000000002 /* PlantMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0A000000000000000000001 /* PlantMemory.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -56,15 +57,16 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		05099F394FC182A10A30211A /* PlantDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabase.swift; sourceTree = "<group>"; };
 		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
 		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
 		0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabaseTests.swift; sourceTree = "<group>"; };
 		14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocol.swift; sourceTree = "<group>"; };
+		1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantMemory.swift; sourceTree = "<group>"; };
 		1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeProtocolTests.swift; sourceTree = "<group>"; };
 		230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClientTests.swift; sourceTree = "<group>"; };
 		3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationHistoryView.swift; sourceTree = "<group>"; };
+		477FF261A878ED83CBA00B4F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4EEFF091310D4BDE120ECE51 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
 		5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkCropTests.swift; sourceTree = "<group>"; };
 		600BD03E36121532166372D4 /* CameraCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureView.swift; sourceTree = "<group>"; };
@@ -93,7 +95,7 @@
 		F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DayDetailView.swift; sourceTree = "<group>"; };
 		F48D7300B5B0307794AED6BE /* AISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsView.swift; sourceTree = "<group>"; };
 		F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimationDemoView.swift; sourceTree = "<group>"; };
-		F0A000000000000000000001 /* PlantMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantMemory.swift; sourceTree = "<group>"; };
+		F82B11E7789415F8CDA49B9A /* summary.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = summary.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -111,10 +113,10 @@
 		30C2000207D7393B0B4C4455 /* PlantTalkBLE */ = {
 			isa = PBXGroup;
 			children = (
-				0A4F39C0D5A84C8DB8D44711 /* Assets.xcassets */,
 				7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */,
 				F48D7300B5B0307794AED6BE /* AISettingsView.swift */,
 				F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */,
+				477FF261A878ED83CBA00B4F /* Assets.xcassets */,
 				600BD03E36121532166372D4 /* CameraCaptureView.swift */,
 				BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */,
 				63A12282A1F665039788BEE3 /* ContentView.swift */,
@@ -129,8 +131,8 @@
 				724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */,
 				BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */,
 				05099F394FC182A10A30211A /* PlantDatabase.swift */,
-				F0A000000000000000000001 /* PlantMemory.swift */,
 				B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */,
+				1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */,
 				D6237A24CE1893E70859F6D7 /* PlantReading.swift */,
 				917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */,
 				A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */,
@@ -138,6 +140,7 @@
 				3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */,
 				06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */,
 				B6EC131A2D56E78478954626 /* SensorChartSheet.swift */,
+				F82B11E7789415F8CDA49B9A /* summary.md */,
 				AFB78923A16E617E7CFEE47A /* TextConversationView.swift */,
 				DFC320A670A990AF4D6F8F0F /* PreviewAudio */,
 			);
@@ -270,8 +273,9 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0A4F39C0D5A84C8DB8D44710 /* Assets.xcassets in Resources */,
+				2935B79F7D1F92540F38C87E /* Assets.xcassets in Resources */,
 				95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */,
+				9358ABC597AD97A477630834 /* summary.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -299,7 +303,7 @@
 				DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */,
 				753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */,
 				97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */,
-				F0A000000000000000000002 /* PlantMemory.swift in Sources */,
+				E16609BD95D4F86AA9A009DA /* PlantMemory.swift in Sources */,
 				2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */,
 				EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */,
 				D38300DF3DB8C01960656B0D /* QwenRealtimeConversation.swift in Sources */,

@@ -1,5 +1,7 @@
 import AVFAudio
+import Combine
 import SwiftUI
+import UIKit
 
 let messageFlightCoordinateSpace = "plant-talk-message-flight"
 
@@ -97,6 +99,8 @@ struct ContentView: View {
     @State private var isPlantDetailsExpanded = false
     @State private var activeTextChat: TextChatLaunch?
     @State private var isTextConversationPresented = false
+    @State private var textConversationTransitionPhase: TextConversationTransitionPhase = .idle
+    @State private var isSoftwareKeyboardVisible = false
     @State private var isInitialTextChatTransitionComplete = false
     @State private var activeMessageFlight: ActiveMessageFlight?
     @State private var startedMessageFlightID: UUID?
@@ -149,6 +153,10 @@ struct ContentView: View {
                             .zIndex(100)
                     }
                 }
+                .ignoresSafeArea(
+                    textConversationTransitionPhase != .idle ? .keyboard : [],
+                    edges: .bottom
+                )
                 .coordinateSpace(name: messageFlightCoordinateSpace)
                 .onPreferenceChange(MessageFlightDestinationPreferenceKey.self) { destinations in
                     messageFlightDestinations = destinations
@@ -186,6 +194,20 @@ struct ContentView: View {
                 .transition(historyOverviewTransition)
                 .zIndex(50)
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillShowNotification
+            )
+        ) { _ in
+            isSoftwareKeyboardVisible = true
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardDidHideNotification
+            )
+        ) { _ in
+            isSoftwareKeyboardVisible = false
         }
         .alert("无法开始植物对话", isPresented: $isTextChatStartErrorPresented) {
             Button("好", role: .cancel) {}
@@ -260,6 +282,7 @@ struct ContentView: View {
                         resumedConversation: activeTextChat.conversation,
                         resumedMessages: activeTextChat.messages,
                         isPagePresented: isTextConversationPresented,
+                        isPageTransitioning: textConversationTransitionPhase != .idle,
                         isInitialTransitionComplete: activeTextChat.isResumed
                             || isInitialTextChatTransitionComplete,
                         completedMessageFlightID: completedMessageFlightID,
@@ -294,8 +317,18 @@ struct ContentView: View {
 
     private var horizontalPageGesture: some Gesture {
         DragGesture(minimumDistance: 24)
+            .onChanged { value in
+                guard !isHistoryOverviewPresented,
+                      textConversationTransitionPhase == .idle,
+                      !isTextConversationPresented,
+                      activeTextChat != nil,
+                      value.translation.width < 0,
+                      isHorizontalSwipe(value.translation) else { return }
+                isHomeTextComposerFocused = false
+            }
             .onEnded { value in
                 guard !isHistoryOverviewPresented,
+                      textConversationTransitionPhase == .idle,
                       isHorizontalSwipe(value.translation) else { return }
 
                 if isTextConversationPresented,
@@ -407,11 +440,31 @@ struct ContentView: View {
     }
 
     private func returnToHome() {
+        guard textConversationTransitionPhase == .idle else { return }
         messageFlightDestinationValidationTask?.cancel()
         messageFlightDestinationValidationTask = nil
-        withAnimation(pageTransitionAnimation) {
-            isTextConversationPresented = false
+        clearMessageFlightForPageExit()
+
+        if isSoftwareKeyboardVisible {
+            dismissSoftwareKeyboard()
         }
+        beginReturnToHomeTransition()
+    }
+
+    private func beginReturnToHomeTransition() {
+        guard textConversationTransitionPhase == .idle else { return }
+        setTextConversationTransitionPhase(.dismissing)
+        withAnimation(
+            pageTransitionAnimation,
+            completionCriteria: .removed
+        ) {
+            isTextConversationPresented = false
+        } completion: {
+            finishTextConversationTransition(.dismissing)
+        }
+    }
+
+    private func clearMessageFlightForPageExit() {
         var cleanupTransaction = Transaction(animation: nil)
         cleanupTransaction.disablesAnimations = true
         withTransaction(cleanupTransaction) {
@@ -422,10 +475,51 @@ struct ContentView: View {
     }
 
     private func showTextConversation() {
+        guard textConversationTransitionPhase == .idle else { return }
         isHomeTextComposerFocused = false
-        withAnimation(pageTransitionAnimation) {
-            isTextConversationPresented = true
+        if isSoftwareKeyboardVisible {
+            dismissSoftwareKeyboard()
         }
+        beginShowTextConversationTransition()
+    }
+
+    private func beginShowTextConversationTransition() {
+        guard textConversationTransitionPhase == .idle else { return }
+        setTextConversationTransitionPhase(.presenting)
+        withAnimation(
+            pageTransitionAnimation,
+            completionCriteria: .removed
+        ) {
+            isTextConversationPresented = true
+        } completion: {
+            finishTextConversationTransition(.presenting)
+        }
+    }
+
+    private func dismissSoftwareKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+
+    private func setTextConversationTransitionPhase(
+        _ phase: TextConversationTransitionPhase
+    ) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            textConversationTransitionPhase = phase
+        }
+    }
+
+    private func finishTextConversationTransition(
+        _ phase: TextConversationTransitionPhase
+    ) {
+        guard textConversationTransitionPhase == phase else { return }
+        setTextConversationTransitionPhase(.idle)
     }
 
     private var pageTransitionAnimation: Animation {
@@ -630,6 +724,12 @@ struct ContentView: View {
             && abs(lhs.width - rhs.width) <= tolerance
             && abs(lhs.height - rhs.height) <= tolerance
     }
+}
+
+private enum TextConversationTransitionPhase {
+    case idle
+    case presenting
+    case dismissing
 }
 
 private struct TextChatLaunch: Identifiable, Equatable {

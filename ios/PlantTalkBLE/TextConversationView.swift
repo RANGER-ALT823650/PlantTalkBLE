@@ -553,6 +553,7 @@ struct TextConversationView: View {
     let initialMessageDate: Date
     let isResumedConversation: Bool
     let isPagePresented: Bool
+    let isPageTransitioning: Bool
     let isInitialTransitionComplete: Bool
     let completedMessageFlightID: UUID?
     let startedMessageFlightID: UUID?
@@ -617,6 +618,7 @@ struct TextConversationView: View {
         resumedConversation: AIConversation? = nil,
         resumedMessages: [ChatMessage] = [],
         isPagePresented: Bool = true,
+        isPageTransitioning: Bool = false,
         isInitialTransitionComplete: Bool,
         completedMessageFlightID: UUID?,
         startedMessageFlightID: UUID?,
@@ -638,6 +640,7 @@ struct TextConversationView: View {
         self.initialMessageDate = initialMessageDate
         self.isResumedConversation = resumedConversation != nil
         self.isPagePresented = isPagePresented
+        self.isPageTransitioning = isPageTransitioning
         self.isInitialTransitionComplete = isInitialTransitionComplete
         self.completedMessageFlightID = completedMessageFlightID
         self.startedMessageFlightID = startedMessageFlightID
@@ -823,10 +826,7 @@ struct TextConversationView: View {
         }
         .onChange(of: isPagePresented) { _, isPresented in
             guard !isPresented else { return }
-            isInputFocused = false
-            isAccessoryMenuExpanded = false
-            imagePreviewItem = nil
-            imagePreviewProgress = 0
+            prepareForPageExit()
         }
         .onDisappear {
             streamingTask?.cancel()
@@ -1317,6 +1317,14 @@ struct TextConversationView: View {
     private func toggleAccessoryMenu() {
         withAnimation(accessoryMenuAnimation) {
             isAccessoryMenuExpanded.toggle()
+        }
+    }
+
+    private func prepareForPageExit() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isInputFocused = false
         }
     }
 
@@ -2587,6 +2595,10 @@ private struct ChatBubblePayload: View {
 private struct SelectableMessageText: UIViewRepresentable {
     let text: String
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         textView.backgroundColor = .clear
@@ -2601,6 +2613,7 @@ private struct SelectableMessageText: UIViewRepresentable {
         textView.adjustsFontForContentSizeCategory = true
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        textView.delegate = context.coordinator
         return textView
     }
 
@@ -2638,6 +2651,127 @@ private struct SelectableMessageText: UIViewRepresentable {
             height: CGFloat.greatestFiniteMagnitude
         ))
         return CGSize(width: fittedWidth, height: ceil(fittedSize.height))
+    }
+
+    static func dismantleUIView(
+        _ textView: UITextView,
+        coordinator: Coordinator
+    ) {
+        ConversationTextSelectionManager.shared.deactivate(textView)
+        textView.delegate = nil
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            if textView.selectedRange.length > 0 {
+                ConversationTextSelectionManager.shared.activate(textView)
+            } else {
+                ConversationTextSelectionManager.shared.deactivate(textView)
+            }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            ConversationTextSelectionManager.shared.deactivate(textView)
+        }
+    }
+}
+
+@MainActor
+private final class ConversationTextSelectionManager: NSObject,
+    UIGestureRecognizerDelegate {
+    static let shared = ConversationTextSelectionManager()
+
+    private weak var selectedTextView: UITextView?
+    private weak var installedWindow: UIWindow?
+    private lazy var outsideTapRecognizer: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(
+            target: self,
+            action: #selector(handleWindowTap(_:))
+        )
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        recognizer.delegate = self
+        return recognizer
+    }()
+
+    func activate(_ textView: UITextView) {
+        if let previous = selectedTextView, previous !== textView {
+            clearSelection(in: previous)
+        }
+        selectedTextView = textView
+        installRecognizerIfNeeded(on: textView.window)
+    }
+
+    func deactivate(_ textView: UITextView) {
+        guard selectedTextView === textView else { return }
+        selectedTextView = nil
+    }
+
+    func gestureRecognizerShouldBegin(
+        _ gestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        (selectedTextView?.selectedRange.length ?? 0) > 0
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    @objc
+    private func handleWindowTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended,
+              let textView = selectedTextView,
+              textView.selectedRange.length > 0 else { return }
+
+        let location = recognizer.location(in: textView)
+        guard !selectionContains(location, in: textView) else { return }
+        let selectedRange = textView.selectedRange
+
+        // Let the tapped control or edit-menu command finish first. If that
+        // interaction creates a new selection, the identity/range checks keep
+        // the new selection intact.
+        Task { @MainActor [weak self, weak textView] in
+            await Task.yield()
+            guard let self,
+                  let textView,
+                  self.selectedTextView === textView,
+                  textView.selectedRange == selectedRange else { return }
+            self.clearSelection(in: textView)
+        }
+    }
+
+    private func installRecognizerIfNeeded(on window: UIWindow?) {
+        guard let window, installedWindow !== window else { return }
+        installedWindow?.removeGestureRecognizer(outsideTapRecognizer)
+        window.addGestureRecognizer(outsideTapRecognizer)
+        installedWindow = window
+    }
+
+    private func selectionContains(
+        _ point: CGPoint,
+        in textView: UITextView
+    ) -> Bool {
+        guard let range = textView.selectedTextRange, !range.isEmpty else {
+            return false
+        }
+        return textView.selectionRects(for: range).contains { selectionRect in
+            selectionRect.rect
+                .insetBy(dx: -6, dy: -6)
+                .contains(point)
+        }
+    }
+
+    private func clearSelection(in textView: UITextView) {
+        if selectedTextView === textView {
+            selectedTextView = nil
+        }
+        let location = textView.selectedRange.location
+        textView.selectedRange = NSRange(location: location, length: 0)
+        textView.resignFirstResponder()
     }
 }
 

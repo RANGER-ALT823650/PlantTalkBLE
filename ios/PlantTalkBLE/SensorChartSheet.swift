@@ -91,8 +91,11 @@ struct SensorChartSheet: View {
             .navigationTitle(metric.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("关闭")
                 }
             }
         }
@@ -190,7 +193,7 @@ struct SensorChartSheet: View {
                 )
                 .foregroundStyle(metric.tint.gradient)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(chartInterpolationMethod)
 
                 AreaMark(
                     x: .value("时间", point.date),
@@ -209,7 +212,16 @@ struct SensorChartSheet: View {
                         endPoint: .bottom
                     )
                 )
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(chartInterpolationMethod)
+
+                if timeRange == .sevenDays {
+                    PointMark(
+                        x: .value("时间", point.date),
+                        y: .value(metric.title, point.value)
+                    )
+                    .foregroundStyle(metric.tint)
+                    .symbolSize(36)
+                }
             }
 
             // X-axis baseline
@@ -245,6 +257,18 @@ struct SensorChartSheet: View {
         .chartXAxis {
             if timeRange == .oneDay {
                 AxisMarks(values: oneDayXAxisValues) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.4, dash: [4, 3]))
+                        .foregroundStyle(Color(uiColor: .separator).opacity(0.5))
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(xAxisLabel(for: date))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if timeRange == .sevenDays {
+                AxisMarks(values: sevenDayXAxisValues) { value in
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.4, dash: [4, 3]))
                         .foregroundStyle(Color(uiColor: .separator).opacity(0.5))
                     AxisValueLabel {
@@ -379,6 +403,10 @@ struct SensorChartSheet: View {
         }
     }
 
+    private var chartInterpolationMethod: InterpolationMethod {
+        timeRange == .sevenDays ? .linear : .catmullRom
+    }
+
     private func xAxisLabel(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
@@ -396,7 +424,7 @@ struct SensorChartSheet: View {
     private func selectedTimeLabel(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
+        formatter.dateFormat = timeRange == .sevenDays ? "MM/dd" : "HH:mm"
         return formatter.string(from: date)
     }
 
@@ -428,7 +456,24 @@ struct SensorChartSheet: View {
     }
 
     private var chartXDomain: ClosedRange<Date> {
-        timeRange.startDate(endingAt: rangeEndDate)...rangeEndDate
+        if timeRange == .sevenDays {
+            let calendar = Calendar.current
+            let start = sevenDayStartDate(endingAt: rangeEndDate)
+            let end = calendar.date(byAdding: .day, value: 7, to: start) ?? rangeEndDate
+            return start...end
+        }
+        return timeRange.startDate(endingAt: rangeEndDate)...rangeEndDate
+    }
+
+    private var sevenDayXAxisValues: [Date] {
+        let calendar = Calendar.current
+        let start = sevenDayStartDate(endingAt: rangeEndDate)
+        return (0..<7).compactMap { offset in
+            guard let dayStart = calendar.date(byAdding: .day, value: offset, to: start) else {
+                return nil
+            }
+            return calendar.date(byAdding: .hour, value: 12, to: dayStart)
+        }
     }
 
     private var oneDayXAxisValues: [Date] {
@@ -539,6 +584,53 @@ struct SensorChartSheet: View {
         }
     }
 
+    /// Returns one point per local calendar day (today plus the preceding six days).
+    /// The noon timestamp keeps each daily average centered under its x-axis label.
+    private func dailyAveragePoints(
+        from points: [ChartDataPoint],
+        endingAt endDate: Date
+    ) -> [ChartDataPoint] {
+        let calendar = Calendar.current
+        let start = sevenDayStartDate(endingAt: endDate)
+
+        return (0..<7).compactMap { dayOffset in
+            guard
+                let dayStart = calendar.date(byAdding: .day, value: dayOffset, to: start),
+                let nextDayStart = calendar.date(byAdding: .day, value: 1, to: dayStart),
+                let pointDate = calendar.date(byAdding: .hour, value: 12, to: dayStart)
+            else {
+                return nil
+            }
+
+            let samples = points.filter { point in
+                point.date >= dayStart && point.date < nextDayStart && point.date <= endDate
+            }
+            guard !samples.isEmpty else { return nil }
+
+            let averageValue = samples.map(\.value).reduce(0, +) / Double(samples.count)
+            return ChartDataPoint(
+                id: UInt32(dayOffset),
+                date: pointDate,
+                value: averageValue,
+                timestampEstimated: samples.allSatisfy(\.timestampEstimated),
+                segmentID: 0
+            )
+        }
+    }
+
+    private func sevenDayStartDate(endingAt endDate: Date) -> Date {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: endDate)
+        return calendar.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
+    }
+
+    private func displayedPoints(from points: [ChartDataPoint], endingAt endDate: Date) -> [ChartDataPoint] {
+        if timeRange == .sevenDays {
+            return dailyAveragePoints(from: points, endingAt: endDate)
+        }
+        return pointsSplitAtMissingSamples(points)
+    }
+
     // MARK: - Data Loading
 
     private func loadData() async {
@@ -546,14 +638,16 @@ struct SensorChartSheet: View {
         selectedPoint = nil
         let endDate = Date()
         rangeEndDate = endDate
-        let startDate = timeRange.startDate(endingAt: endDate)
+        let startDate = timeRange == .sevenDays
+            ? sevenDayStartDate(endingAt: endDate)
+            : timeRange.startDate(endingAt: endDate)
 
         if let previewData {
             // Preview mode: use injected data, filter by time range
             let filtered = previewData.filter { $0.date >= startDate && $0.date <= endDate }
-            let segmentedPoints = pointsSplitAtMissingSamples(filtered)
+            let preparedPoints = displayedPoints(from: filtered, endingAt: endDate)
             withAnimation(.easeInOut(duration: 0.3)) {
-                dataPoints = segmentedPoints
+                dataPoints = preparedPoints
                 isLoading = false
             }
             return
@@ -576,9 +670,9 @@ struct SensorChartSheet: View {
                     timestampEstimated: reading.timestampEstimated
                 )
             }
-            let segmentedPoints = pointsSplitAtMissingSamples(points)
+            let preparedPoints = displayedPoints(from: points, endingAt: endDate)
             withAnimation(.easeInOut(duration: 0.3)) {
-                dataPoints = segmentedPoints
+                dataPoints = preparedPoints
                 isLoading = false
             }
         } catch {
