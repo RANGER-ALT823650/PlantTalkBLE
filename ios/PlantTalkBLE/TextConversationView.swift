@@ -2249,6 +2249,7 @@ private enum ConversationMotion {
     static let catchUpDuration = 0.24
     static let catchUpDurationMilliseconds = 240
     static let hiddenComposerOffset: CGFloat = -1_000
+    static let stableAssistantWidthCharacterCount = 160
 }
 
 private struct ConversationBottomMarker: View {
@@ -2468,7 +2469,10 @@ private struct StreamingAssistantMessageRow: View {
         Group {
             if isPresentationEnabled,
                let message = state.visibleMessage {
-                ChatMessageBubble(message: message)
+                ChatMessageBubble(
+                    message: message,
+                    usesStableAssistantWidth: true
+                )
                     .transition(.opacity)
                     .transaction { transaction in
                         transaction.animation = nil
@@ -2516,6 +2520,7 @@ struct ChatMessageBubble: View {
     let flightDestinationID: UUID?
     let reportsFlightDestination: Bool
     let isFlightComplete: Bool
+    let usesStableAssistantWidth: Bool
 
     init(
         message: ChatMessage,
@@ -2523,7 +2528,8 @@ struct ChatMessageBubble: View {
         onImagePreview: ConversationImagePreviewAction? = nil,
         flightDestinationID: UUID? = nil,
         reportsFlightDestination: Bool = true,
-        isFlightComplete: Bool = true
+        isFlightComplete: Bool = true,
+        usesStableAssistantWidth: Bool = false
     ) {
         self.message = message
         self.activeImagePreviewSourceID = activeImagePreviewSourceID
@@ -2531,6 +2537,7 @@ struct ChatMessageBubble: View {
         self.flightDestinationID = flightDestinationID
         self.reportsFlightDestination = reportsFlightDestination
         self.isFlightComplete = isFlightComplete
+        self.usesStableAssistantWidth = usesStableAssistantWidth
     }
 
     var body: some View {
@@ -2553,6 +2560,7 @@ struct ChatMessageBubble: View {
                     ChatBubblePayload(
                         text: message.content,
                         rendersMarkdown: message.role == .assistant,
+                        usesStableTextWidth: shouldUseStableAssistantWidth,
                         imageAttachments: message.imageAttachments,
                         activeImagePreviewSourceID: activeImagePreviewSourceID,
                         onImagePreview: onImagePreview,
@@ -2570,6 +2578,16 @@ struct ChatMessageBubble: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(message.role == .user ? "我的消息" : "植物回复")
+    }
+
+    private var shouldUseStableAssistantWidth: Bool {
+        message.role == .assistant
+            && (usesStableAssistantWidth
+                || message.content.index(
+                    message.content.startIndex,
+                    offsetBy: ConversationMotion.stableAssistantWidthCharacterCount,
+                    limitedBy: message.content.endIndex
+                ) != nil)
     }
 }
 
@@ -2597,6 +2615,7 @@ private struct UserBubbleFlightPlaceholder: View {
 private struct ChatBubblePayload: View {
     let text: String
     let rendersMarkdown: Bool
+    let usesStableTextWidth: Bool
     let imageAttachments: [ChatImageAttachment]
     let activeImagePreviewSourceID: String?
     let onImagePreview: ConversationImagePreviewAction?
@@ -2606,6 +2625,7 @@ private struct ChatBubblePayload: View {
     init(
         text: String,
         rendersMarkdown: Bool = false,
+        usesStableTextWidth: Bool = false,
         imageAttachments: [ChatImageAttachment] = [],
         activeImagePreviewSourceID: String? = nil,
         onImagePreview: ConversationImagePreviewAction? = nil,
@@ -2614,6 +2634,7 @@ private struct ChatBubblePayload: View {
     ) {
         self.text = text
         self.rendersMarkdown = rendersMarkdown
+        self.usesStableTextWidth = usesStableTextWidth
         self.imageAttachments = imageAttachments
         self.activeImagePreviewSourceID = activeImagePreviewSourceID
         self.onImagePreview = onImagePreview
@@ -2634,7 +2655,8 @@ private struct ChatBubblePayload: View {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 SelectableMessageText(
                     text: text,
-                    rendersMarkdown: rendersMarkdown
+                    rendersMarkdown: rendersMarkdown,
+                    usesStableWidth: usesStableTextWidth
                 )
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -3093,10 +3115,16 @@ private enum MarkdownMessageRenderer {
 private struct SelectableMessageText: UIViewRepresentable {
     let text: String
     let rendersMarkdown: Bool
+    let usesStableWidth: Bool
 
-    init(text: String, rendersMarkdown: Bool = false) {
+    init(
+        text: String,
+        rendersMarkdown: Bool = false,
+        usesStableWidth: Bool = false
+    ) {
         self.text = text
         self.rendersMarkdown = rendersMarkdown
+        self.usesStableWidth = usesStableWidth
     }
 
     func makeCoordinator() -> Coordinator {
@@ -3148,7 +3176,9 @@ private struct SelectableMessageText: UIViewRepresentable {
 
         return context.coordinator.fittedSize(
             for: textView,
-            proposedWidth: proposedWidth
+            proposedWidth: proposedWidth,
+            rendersMarkdown: rendersMarkdown,
+            usesStableWidth: usesStableWidth
         )
     }
 
@@ -3197,7 +3227,9 @@ private struct SelectableMessageText: UIViewRepresentable {
 
         func fittedSize(
             for textView: UITextView,
-            proposedWidth: CGFloat
+            proposedWidth: CGFloat,
+            rendersMarkdown: Bool,
+            usesStableWidth: Bool
         ) -> CGSize {
             if let cachedMeasurement,
                abs(cachedMeasurement.width - proposedWidth) <= 0.5 {
@@ -3212,10 +3244,26 @@ private struct SelectableMessageText: UIViewRepresentable {
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 context: nil
             )
-            let fittedWidth = min(
-                proposedWidth,
-                max(ceil(textBounds.width), 1)
-            )
+            let fittedWidth = usesStableWidth
+                ? proposedWidth
+                : min(proposedWidth, max(ceil(textBounds.width), 1))
+
+            // Markdown layout (tables, tab stops) depends on the render width, so
+            // re-render at the final display width *now*. Otherwise `updateUIView`
+            // renders a second time at the narrower `bounds.width`, re-wraps the
+            // content, and changes the row height after layout — which makes the
+            // scroll indicator jump when a long bubble settles at the bottom.
+            if rendersMarkdown,
+               let renderedText,
+               abs(renderedWidth - fittedWidth) > 0.5 {
+                update(
+                    textView,
+                    text: renderedText,
+                    rendersMarkdown: true,
+                    width: fittedWidth
+                )
+            }
+
             let fittedSize = textView.sizeThatFits(CGSize(
                 width: fittedWidth,
                 height: CGFloat.greatestFiniteMagnitude
@@ -3242,6 +3290,13 @@ private struct SelectableMessageText: UIViewRepresentable {
     }
 }
 
+/// Read by the parent page gesture without exposing the selection manager or
+/// coupling the conversation's message hierarchy to ContentView bindings.
+@MainActor
+var isConversationTextSelectionActive: Bool {
+    ConversationTextSelectionManager.shared.hasActiveSelection
+}
+
 @MainActor
 private final class ConversationTextSelectionManager: NSObject,
     UIGestureRecognizerDelegate {
@@ -3249,6 +3304,11 @@ private final class ConversationTextSelectionManager: NSObject,
 
     private weak var selectedTextView: UITextView?
     private weak var installedWindow: UIWindow?
+
+    var hasActiveSelection: Bool {
+        (selectedTextView?.selectedRange.length ?? 0) > 0
+    }
+
     private lazy var outsideTapRecognizer: UITapGestureRecognizer = {
         let recognizer = UITapGestureRecognizer(
             target: self,
@@ -3277,7 +3337,7 @@ private final class ConversationTextSelectionManager: NSObject,
     func gestureRecognizerShouldBegin(
         _ gestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        (selectedTextView?.selectedRange.length ?? 0) > 0
+        hasActiveSelection
     }
 
     func gestureRecognizer(

@@ -122,6 +122,7 @@ struct ContentView: View {
     @State private var plantArtwork: PlantArtwork?
     @FocusState private var isHomeTextComposerFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     init(
         bluetooth: PlantBluetoothManager,
@@ -187,6 +188,30 @@ struct ContentView: View {
                 }
                 .scrollDisabled(interactivePageTransition != nil)
 
+                if let activeTextConversationSnapshot {
+                    TextConversationSnapshotView(
+                        snapshot: activeTextConversationSnapshot
+                    )
+                    .id(activeTextConversationSnapshot.id)
+                    .frame(
+                        width: activeTextConversationSnapshot.pageSize.width,
+                        height: activeTextConversationSnapshot.pageSize.height
+                    )
+                    .modifier(
+                        InteractivePageOffsetModifier(
+                            page: .textConversation,
+                            dragState: interactivePageDragState,
+                            transition: interactivePageTransition,
+                            isPresented: isTextConversationPresented,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .zIndex(40)
+                }
+
                 if isHistoryOverviewRendered {
                     NavigationStack {
                         HistoryOverviewView(
@@ -245,6 +270,11 @@ struct ContentView: View {
         } message: {
             Text(textChatStartError ?? "无法绑定当前植物。")
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                forceResolveInFlightTransitions()
+            }
+        }
     }
 
     private var screenLayers: some View {
@@ -259,6 +289,7 @@ struct ContentView: View {
                     realtimeConversationState: realtimeConversation.state,
                     voiceVisualDriver: realtimeConversation.voiceVisualDriver,
                     isInteractionSuppressed: isHomeDashboardInteractionSuppressed,
+                    isMotionPaused: isPageTransitionActive,
                     onTextSend: startTextConversation,
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
@@ -356,28 +387,6 @@ struct ContentView: View {
                     .zIndex(2)
                 }
 
-                if let activeTextConversationSnapshot {
-                    TextConversationSnapshotView(
-                        snapshot: activeTextConversationSnapshot
-                    )
-                    .id(activeTextConversationSnapshot.id)
-                    .frame(
-                        width: activeTextConversationSnapshot.pageSize.width,
-                        height: activeTextConversationSnapshot.pageSize.height
-                    )
-                    .modifier(
-                        InteractivePageOffsetModifier(
-                            page: .textConversation,
-                            dragState: interactivePageDragState,
-                            transition: interactivePageTransition,
-                            isPresented: isTextConversationPresented,
-                            pageWidth: geometry.size.width
-                        )
-                    )
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                    .zIndex(3)
-                }
             }
         }
     }
@@ -400,6 +409,14 @@ struct ContentView: View {
         isHistoryOverviewPresented
             || interactivePageTransition == .presentingHistory
             || interactivePageTransition == .dismissingHistory
+    }
+
+    /// True while a page is being dragged or is settling. The home dashboard's
+    /// orb runs a 30fps `TimelineView`; pausing it for the duration of a page
+    /// transition removes continuous recomposition of the revealed home behind
+    /// the sliding layer, which is a large per-frame cost on iOS 26 glass.
+    private var isPageTransitionActive: Bool {
+        interactivePageTransition != nil || isInteractivePageSettling
     }
 
     private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
@@ -448,6 +465,13 @@ struct ContentView: View {
         pageWidth: CGFloat
     ) {
         guard !isInteractivePageSettling else { return }
+
+        // A selected message is owned by UIKit's UITextView. Its selection
+        // handles also move horizontally, so the page gesture must stay idle
+        // until that native interaction ends. Once a page transition has
+        // already begun, keep driving it so it can always settle cleanly.
+        guard interactivePageTransition != nil
+                || !isConversationTextSelectionActive else { return }
 
         switch interactivePageTransition {
         case .presentingHistory:
@@ -651,6 +675,44 @@ struct ContentView: View {
         releaseHomeDashboardInteractionAfterGesture()
     }
 
+    /// Interactive transitions resolve their final state inside `withAnimation`
+    /// completion closures. When the scene leaves `.active` mid-transition those
+    /// closures can be dropped, leaving `isInteractivePageSettling` /
+    /// `interactivePageTransition` stuck — which then blocks every page gesture
+    /// and disables the scroll views, so the app looks frozen after relaunch.
+    /// Snap all in-flight transition state back to a consistent resting state.
+    private func forceResolveInFlightTransitions() {
+        homeDashboardInteractionReleaseTask?.cancel()
+        homeDashboardInteractionReleaseTask = nil
+        textConversationSnapshotRefreshTask?.cancel()
+        textConversationSnapshotRefreshTask = nil
+        messageFlightDestinationValidationTask?.cancel()
+        messageFlightDestinationValidationTask = nil
+
+        let stuckFlightID = activeMessageFlight?.request.id
+
+        setWithoutAnimation {
+            interactivePageTransition = nil
+            interactivePageDragState.translation = 0
+            isInteractivePageSettling = false
+            activeTextConversationSnapshot = nil
+            isHomeDashboardInteractionSuppressed = false
+            textConversationTransitionPhase = .idle
+
+            // A flight interrupted before reaching its destination would keep the
+            // composer and the real chat bubble hidden forever. Resolve it the
+            // same way `completeMessageFlight` would have.
+            if let stuckFlightID {
+                activeMessageFlight = nil
+                startedMessageFlightID = stuckFlightID
+                completedMessageFlightID = stuckFlightID
+                if stuckFlightID == activeTextChat?.id {
+                    isInitialTextChatTransitionComplete = true
+                }
+            }
+        }
+    }
+
     private func activateTextConversationSnapshotForDismissal() {
         textConversationSnapshotRefreshTask?.cancel()
         textConversationSnapshotRefreshTask = nil
@@ -714,8 +776,9 @@ struct ContentView: View {
         guard let snapshot = cachedTextConversationSnapshot,
               snapshot.conversationID == activeTextChat?.id,
               let anchor = textConversationSnapshotAnchor,
-              abs(snapshot.pageSize.width - anchor.bounds.width) < 1,
-              abs(snapshot.pageSize.height - anchor.bounds.height) < 1 else {
+              let window = anchor.window,
+              abs(snapshot.pageSize.width - window.bounds.width) < 1,
+              abs(snapshot.pageSize.height - window.bounds.height) < 1 else {
             return nil
         }
         return snapshot
@@ -732,14 +795,15 @@ struct ContentView: View {
               !anchor.bounds.isEmpty else { return nil }
 
         let pageRect = anchor.convert(anchor.bounds, to: window)
-        let visibleRect = pageRect.intersection(window.bounds)
-        guard !visibleRect.isNull,
-              visibleRect.width > 0,
-              visibleRect.height > 0,
-              abs(visibleRect.width - pageRect.width) < 1,
-              abs(visibleRect.height - pageRect.height) < 1,
+        let windowRect = window.bounds
+        let visiblePageRect = pageRect.intersection(windowRect)
+        guard !visiblePageRect.isNull,
+              visiblePageRect.width > 0,
+              visiblePageRect.height > 0,
+              abs(visiblePageRect.width - pageRect.width) < 1,
+              abs(visiblePageRect.height - pageRect.height) < 1,
               let snapshotView = window.resizableSnapshotView(
-                from: visibleRect,
+                from: windowRect,
                 afterScreenUpdates: false,
                 withCapInsets: .zero
               ) else { return nil }
@@ -747,7 +811,7 @@ struct ContentView: View {
         snapshotView.isUserInteractionEnabled = false
         return TextConversationTransitionSnapshot(
             conversationID: conversationID,
-            pageSize: visibleRect.size,
+            pageSize: windowRect.size,
             contentView: snapshotView
         )
     }
@@ -1425,19 +1489,28 @@ private struct HomeDashboard: View {
     let realtimeConversationState: RealtimeConversationState
     let voiceVisualDriver: VoiceVisualDriver
     let isInteractionSuppressed: Bool
+    let isMotionPaused: Bool
     let onTextSend: (TextChatLaunch) -> Void
     let onPrimaryButtonTap: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var stableLayoutHeight: CGFloat?
 
     var body: some View {
         GeometryReader { proxy in
+            let liveHeight = proxy.size.height
+            // 页面横向转场时，导航栏的顶部安全区会短暂出现/消失，使这里的可用
+            // 高度跳动，从而让植物卡片和底部主按钮上下漂移。转场进行中改用最近
+            // 一次稳定态记录的高度来分配布局，转场结束后再跟随真实高度。
+            let layoutHeight = isMotionPaused
+                ? (stableLayoutHeight ?? liveHeight)
+                : liveHeight
             let horizontalInset = proxy.size.width * 0.05
             let contentWidth = proxy.size.width - horizontalInset * 2
             let artworkWidth = contentWidth * (isDetailsExpanded ? 0.38 : 0.66)
             let actionButtonWidth = contentWidth * 0.32
 
-            ZStack {
+            ZStack(alignment: .top) {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -1459,7 +1532,7 @@ private struct HomeDashboard: View {
                         .transition(textComposerTransition)
                     } else {
                         Spacer(minLength: 0)
-                            .frame(maxHeight: proxy.size.height * 0.12)
+                            .frame(maxHeight: layoutHeight * 0.12)
                     }
 
                     PlantArtworkControl(
@@ -1484,6 +1557,7 @@ private struct HomeDashboard: View {
                     PrimaryInteractionButton(
                         realtimeConversationState: realtimeConversationState,
                         voiceVisualDriver: voiceVisualDriver,
+                        isMotionPaused: isMotionPaused,
                         onTap: {
                             guard !isInteractionSuppressed else { return }
                             onPrimaryButtonTap()
@@ -1493,9 +1567,15 @@ private struct HomeDashboard: View {
                     .padding(.bottom)
                 }
                 .padding(.horizontal, horizontalInset)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, minHeight: layoutHeight, maxHeight: layoutHeight)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .onChange(of: liveHeight) { _, newValue in
+                recordStableLayoutHeight(newValue)
+            }
+            .onAppear {
+                recordStableLayoutHeight(liveHeight)
+            }
         }
         .background(Color(uiColor: .systemBackground))
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -1503,6 +1583,16 @@ private struct HomeDashboard: View {
             if isActive {
                 isTextComposerFocused.wrappedValue = false
             }
+        }
+    }
+
+    /// Only capture the container height while no page transition is running,
+    /// so the frozen height used during a transition always reflects the last
+    /// settled layout rather than a mid-animation safe-area jump.
+    private func recordStableLayoutHeight(_ height: CGFloat) {
+        guard !isMotionPaused, height > 0 else { return }
+        if stableLayoutHeight != height {
+            stableLayoutHeight = height
         }
     }
 
@@ -1889,6 +1979,7 @@ private struct SensorCardButtonStyle: ButtonStyle {
 private struct PrimaryInteractionButton: View {
     let realtimeConversationState: RealtimeConversationState
     let voiceVisualDriver: VoiceVisualDriver
+    let isMotionPaused: Bool
     let onTap: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1903,7 +1994,8 @@ private struct PrimaryInteractionButton: View {
                     activity: animationActivity,
                     visualLevel: voiceVisualDriver.normalizedLevel,
                     accent: voiceVisualDriver.accent,
-                    isMotionReduced: reduceMotion
+                    isMotionReduced: reduceMotion,
+                    isMotionPaused: isMotionPaused
                 )
                     .shadow(
                         color: tint.opacity(0.25),
@@ -1961,9 +2053,15 @@ private struct DiffuseOrb: View {
     var visualLevel: Double = 0
     var accent: VoiceVisualAccent? = nil
     let isMotionReduced: Bool
+    var isMotionPaused: Bool = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isMotionReduced)) { timeline in
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 30.0,
+                paused: isMotionReduced || isMotionPaused
+            )
+        ) { timeline in
             let time = isMotionReduced ? 0 : timeline.date.timeIntervalSinceReferenceDate
             let phase = time * (0.34 + 0.28 * activity)
             let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: time)
@@ -2123,6 +2221,7 @@ private struct HomeDashboardPreview: View {
             realtimeConversationState: .idle,
             voiceVisualDriver: VoiceVisualDriver(),
             isInteractionSuppressed: false,
+            isMotionPaused: false,
             onTextSend: { _ in },
             onPrimaryButtonTap: {}
         )
