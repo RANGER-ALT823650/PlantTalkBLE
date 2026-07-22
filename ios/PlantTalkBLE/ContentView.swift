@@ -97,6 +97,15 @@ struct ContentView: View {
     @State private var isRealtimeTranscriptPresented = false
     @State private var isHistoryOverviewPresented = false
     @State private var isHistoryDetailPresented = false
+    @State private var interactivePageTransition: InteractivePageTransition?
+    @State private var interactivePageDragState = InteractivePageDragState()
+    @State private var isInteractivePageSettling = false
+    @State private var isHomeDashboardInteractionSuppressed = false
+    @State private var homeDashboardInteractionReleaseTask: Task<Void, Never>?
+    @State private var textConversationSnapshotAnchor: UIView?
+    @State private var cachedTextConversationSnapshot: TextConversationTransitionSnapshot?
+    @State private var activeTextConversationSnapshot: TextConversationTransitionSnapshot?
+    @State private var textConversationSnapshotRefreshTask: Task<Void, Never>?
     @State private var isPlantDetailsExpanded = false
     @State private var activeTextChat: TextChatLaunch?
     @State private var isTextConversationPresented = false
@@ -141,62 +150,79 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack {
-            NavigationStack {
-                ZStack {
-                    screenLayers
-
-                    if let activeMessageFlight,
-                       activeMessageFlight.hasStarted
-                        || activeMessageFlight.request.showsOverlayWhilePreparing {
-                        MessageFlightOverlay(flight: activeMessageFlight)
-                            .allowsHitTesting(false)
-                            .zIndex(100)
-                    }
-                }
-                .ignoresSafeArea(
-                    textConversationTransitionPhase != .idle ? .keyboard : [],
-                    edges: .bottom
-                )
-                .coordinateSpace(name: messageFlightCoordinateSpace)
-                .onPreferenceChange(MessageFlightDestinationPreferenceKey.self) { destinations in
-                    messageFlightDestinations = destinations
-                    scheduleMessageFlightDestinationValidation()
-                }
-                .sheet(isPresented: $isRealtimeTranscriptPresented) {
-                    RealtimeConversationSheet(conversation: realtimeConversation)
-                }
-                .onChange(of: realtimeConversation.state) { _, state in
-                    if case .error = state {
-                        isRealtimeTranscriptPresented = true
-                    }
-                }
-                .simultaneousGesture(horizontalPageGesture)
-            }
-
-            if isHistoryOverviewPresented {
+        GeometryReader { geometry in
+            ZStack {
                 NavigationStack {
-                    HistoryOverviewView(
-                        database: database,
-                        onContinueTextConversation: continueTextConversation,
-                        onContinueRealtimeConversation: continueRealtimeConversation,
-                        onDetailPresentationChanged: { isPresented in
-                            isHistoryDetailPresented = isPresented
+                    ZStack {
+                        screenLayers
+
+                        if let activeMessageFlight,
+                           activeMessageFlight.hasStarted
+                            || activeMessageFlight.request.showsOverlayWhilePreparing {
+                            MessageFlightOverlay(flight: activeMessageFlight)
+                                .allowsHitTesting(false)
+                                .zIndex(100)
                         }
+                    }
+                    .ignoresSafeArea(
+                        textConversationTransitionPhase != .idle ? .keyboard : [],
+                        edges: .bottom
                     )
-                        .background(Color(uiColor: .systemBackground))
-                        .toolbar {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                Button(action: hideHistoryOverview) {
-                                    Image(systemName: "xmark")
-                                }
-                                .accessibilityLabel("返回")
-                            }
+                    .coordinateSpace(name: messageFlightCoordinateSpace)
+                    .onPreferenceChange(MessageFlightDestinationPreferenceKey.self) { destinations in
+                        messageFlightDestinations = destinations
+                        scheduleMessageFlightDestinationValidation()
+                    }
+                    .sheet(isPresented: $isRealtimeTranscriptPresented) {
+                        RealtimeConversationSheet(conversation: realtimeConversation)
+                    }
+                    .onChange(of: realtimeConversation.state) { _, state in
+                        if case .error = state {
+                            isRealtimeTranscriptPresented = true
                         }
+                    }
+                    .simultaneousGesture(
+                        horizontalPageGesture(pageWidth: geometry.size.width)
+                    )
                 }
-                .simultaneousGesture(hideHistoryGesture)
-                .transition(historyOverviewTransition)
-                .zIndex(50)
+                .scrollDisabled(interactivePageTransition != nil)
+
+                if isHistoryOverviewRendered {
+                    NavigationStack {
+                        HistoryOverviewView(
+                            database: database,
+                            onContinueTextConversation: continueTextConversation,
+                            onContinueRealtimeConversation: continueRealtimeConversation,
+                            onDetailPresentationChanged: { isPresented in
+                                isHistoryDetailPresented = isPresented
+                            }
+                        )
+                            .background(Color(uiColor: .systemBackground))
+                            .toolbar {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button(action: hideHistoryOverview) {
+                                        Image(systemName: "xmark")
+                                    }
+                                    .accessibilityLabel("返回")
+                                }
+                            }
+                    }
+                    .scrollDisabled(interactivePageTransition != nil)
+                    .modifier(
+                        InteractivePageOffsetModifier(
+                            page: .history,
+                            dragState: interactivePageDragState,
+                            transition: interactivePageTransition,
+                            isPresented: isHistoryOverviewPresented,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .simultaneousGesture(
+                        hideHistoryGesture(pageWidth: geometry.size.width)
+                    )
+                    .transition(historyOverviewTransition)
+                    .zIndex(50)
+                }
             }
         }
         .onReceive(
@@ -212,6 +238,7 @@ struct ContentView: View {
             )
         ) { _ in
             isSoftwareKeyboardVisible = false
+            scheduleTextConversationSnapshotRefresh()
         }
         .alert("无法开始植物对话", isPresented: $isTextChatStartErrorPresented) {
             Button("好", role: .cancel) {}
@@ -231,11 +258,15 @@ struct ContentView: View {
                     isTextComposerFocused: $isHomeTextComposerFocused,
                     realtimeConversationState: realtimeConversation.state,
                     voiceVisualDriver: realtimeConversation.voiceVisualDriver,
+                    isInteractionSuppressed: isHomeDashboardInteractionSuppressed,
                     onTextSend: startTextConversation,
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
                 .zIndex(1)
-                .allowsHitTesting(!isTextConversationPresented)
+                .allowsHitTesting(
+                    !isTextConversationPresented
+                        && !isHomeDashboardInteractionSuppressed
+                )
                 .toolbar(.visible, for: .navigationBar)
                 .toolbar {
                     if !isTextConversationPresented {
@@ -296,10 +327,56 @@ struct ContentView: View {
                         onHome: returnToHome
                     )
                     .id(activeTextChat.id)
-                    .offset(x: isTextConversationPresented ? 0 : geometry.size.width)
-                    .allowsHitTesting(isTextConversationPresented)
-                    .accessibilityHidden(!isTextConversationPresented)
+                    .background {
+                        TextConversationSnapshotAnchor { anchor in
+                            guard textConversationSnapshotAnchor !== anchor else { return }
+                            textConversationSnapshotAnchor = anchor
+                        }
+                    }
+                    .modifier(
+                        InteractivePageOffsetModifier(
+                            page: .textConversation,
+                            dragState: interactivePageDragState,
+                            transition: activeTextConversationSnapshot == nil
+                                ? interactivePageTransition
+                                : nil,
+                            isPresented: isTextConversationPresented,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .opacity(activeTextConversationSnapshot == nil ? 1 : 0)
+                    .allowsHitTesting(
+                        isTextConversationPresented
+                            && activeTextConversationSnapshot == nil
+                    )
+                    .accessibilityHidden(
+                        !isTextConversationPresented
+                            || activeTextConversationSnapshot != nil
+                    )
                     .zIndex(2)
+                }
+
+                if let activeTextConversationSnapshot {
+                    TextConversationSnapshotView(
+                        snapshot: activeTextConversationSnapshot
+                    )
+                    .id(activeTextConversationSnapshot.id)
+                    .frame(
+                        width: activeTextConversationSnapshot.pageSize.width,
+                        height: activeTextConversationSnapshot.pageSize.height
+                    )
+                    .modifier(
+                        InteractivePageOffsetModifier(
+                            page: .textConversation,
+                            dragState: interactivePageDragState,
+                            transition: interactivePageTransition,
+                            isPresented: isTextConversationPresented,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .zIndex(3)
                 }
             }
         }
@@ -319,44 +396,391 @@ struct ContentView: View {
         )
     }
 
-    private var horizontalPageGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
+    private var isHistoryOverviewRendered: Bool {
+        isHistoryOverviewPresented
+            || interactivePageTransition == .presentingHistory
+            || interactivePageTransition == .dismissingHistory
+    }
+
+    private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12)
             .onChanged { value in
-                guard !isHistoryOverviewPresented,
-                      textConversationTransitionPhase == .idle,
-                      !isTextConversationPresented,
-                      activeTextChat != nil,
-                      value.translation.width < 0,
-                      isHorizontalSwipe(value.translation) else { return }
-                isHomeTextComposerFocused = false
+                updateHorizontalPageDrag(value, pageWidth: pageWidth)
             }
             .onEnded { value in
-                guard !isHistoryOverviewPresented,
-                      textConversationTransitionPhase == .idle,
-                      isHorizontalSwipe(value.translation) else { return }
-
-                if isTextConversationPresented,
-                   value.translation.width > 70 {
-                    returnToHome()
-                } else if !isTextConversationPresented,
-                          value.translation.width > 70 {
-                    showHistoryOverview()
-                } else if !isTextConversationPresented,
-                          value.translation.width < -70,
-                          activeTextChat != nil {
-                    showTextConversation()
-                }
+                finishHorizontalPageDrag(value, pageWidth: pageWidth)
             }
     }
 
-    private var hideHistoryGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                guard !isHistoryDetailPresented,
-                      isHorizontalSwipe(value.translation),
-                      value.translation.width < -70 else { return }
-                hideHistoryOverview()
+    private func hideHistoryGesture(pageWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                guard !isInteractivePageSettling else { return }
+
+                if interactivePageTransition == .dismissingHistory {
+                    interactivePageDragState.translation = min(0, value.translation.width)
+                    return
+                }
+
+                guard interactivePageTransition == nil,
+                      isHistoryOverviewPresented,
+                      !isHistoryDetailPresented,
+                      value.translation.width < 0,
+                      isHorizontalSwipe(value.translation) else { return }
+
+                interactivePageTransition = .dismissingHistory
+                interactivePageDragState.translation = value.translation.width
             }
+            .onEnded { value in
+                guard interactivePageTransition == .dismissingHistory else { return }
+                let shouldDismiss = shouldCompleteInteractiveTransition(
+                    translation: value.translation.width,
+                    predictedTranslation: value.predictedEndTranslation.width,
+                    direction: -1,
+                    pageWidth: pageWidth
+                )
+                settleHistoryDismissal(shouldDismiss: shouldDismiss, pageWidth: pageWidth)
+            }
+    }
+
+    private func updateHorizontalPageDrag(
+        _ value: DragGesture.Value,
+        pageWidth: CGFloat
+    ) {
+        guard !isInteractivePageSettling else { return }
+
+        switch interactivePageTransition {
+        case .presentingHistory:
+            interactivePageDragState.translation = max(0, value.translation.width)
+            return
+        case .presentingTextConversation:
+            interactivePageDragState.translation = min(0, value.translation.width)
+            return
+        case .dismissingTextConversation:
+            interactivePageDragState.translation = max(0, value.translation.width)
+            return
+        case .dismissingHistory:
+            return
+        case nil:
+            break
+        }
+
+        guard !isHistoryOverviewPresented,
+              textConversationTransitionPhase == .idle,
+              isHorizontalSwipe(value.translation) else { return }
+
+        if isTextConversationPresented, value.translation.width > 0 {
+            activateTextConversationSnapshotForDismissal()
+            interactivePageTransition = .dismissingTextConversation
+            interactivePageDragState.translation = value.translation.width
+        } else if !isTextConversationPresented, value.translation.width > 0 {
+            isHomeTextComposerFocused = false
+            suppressHomeDashboardInteraction()
+            interactivePageTransition = .presentingHistory
+            interactivePageDragState.translation = value.translation.width
+        } else if !isTextConversationPresented,
+                  value.translation.width < 0,
+                  activeTextChat != nil {
+            isHomeTextComposerFocused = false
+            suppressHomeDashboardInteraction()
+            activateCachedTextConversationSnapshot()
+            interactivePageTransition = .presentingTextConversation
+            interactivePageDragState.translation = value.translation.width
+        }
+    }
+
+    private func finishHorizontalPageDrag(
+        _ value: DragGesture.Value,
+        pageWidth: CGFloat
+    ) {
+        guard let transition = interactivePageTransition else { return }
+
+        switch transition {
+        case .presentingHistory:
+            let shouldPresent = shouldCompleteInteractiveTransition(
+                translation: value.translation.width,
+                predictedTranslation: value.predictedEndTranslation.width,
+                direction: 1,
+                pageWidth: pageWidth
+            )
+            settleHistoryPresentation(shouldPresent: shouldPresent, pageWidth: pageWidth)
+        case .presentingTextConversation:
+            let shouldPresent = shouldCompleteInteractiveTransition(
+                translation: value.translation.width,
+                predictedTranslation: value.predictedEndTranslation.width,
+                direction: -1,
+                pageWidth: pageWidth
+            )
+            settleTextConversationPresentation(
+                shouldPresent: shouldPresent,
+                pageWidth: pageWidth
+            )
+        case .dismissingTextConversation:
+            let shouldDismiss = shouldCompleteInteractiveTransition(
+                translation: value.translation.width,
+                predictedTranslation: value.predictedEndTranslation.width,
+                direction: 1,
+                pageWidth: pageWidth
+            )
+            settleTextConversationDismissal(
+                shouldDismiss: shouldDismiss,
+                pageWidth: pageWidth
+            )
+        case .dismissingHistory:
+            break
+        }
+    }
+
+    private func shouldCompleteInteractiveTransition(
+        translation: CGFloat,
+        predictedTranslation: CGFloat,
+        direction: CGFloat,
+        pageWidth: CGFloat
+    ) -> Bool {
+        let distance = translation * direction
+        let projectedDistance = predictedTranslation * direction
+        return distance > pageWidth * 0.33
+            || (distance > 12 && projectedDistance > pageWidth * 0.5)
+    }
+
+    private func settleHistoryPresentation(
+        shouldPresent: Bool,
+        pageWidth: CGFloat
+    ) {
+        if shouldPresent {
+            setWithoutAnimation {
+                isHistoryOverviewPresented = true
+            }
+        }
+        isInteractivePageSettling = true
+        withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+            interactivePageDragState.translation = shouldPresent ? pageWidth : 0
+        } completion: {
+            guard interactivePageTransition == .presentingHistory else { return }
+            resetInteractivePageTransition()
+        }
+    }
+
+    private func settleHistoryDismissal(
+        shouldDismiss: Bool,
+        pageWidth: CGFloat
+    ) {
+        isInteractivePageSettling = true
+        withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+            interactivePageDragState.translation = shouldDismiss ? -pageWidth : 0
+        } completion: {
+            guard interactivePageTransition == .dismissingHistory else { return }
+            setWithoutAnimation {
+                if shouldDismiss {
+                    isHistoryOverviewPresented = false
+                    isHistoryDetailPresented = false
+                }
+                resetInteractivePageTransition()
+            }
+        }
+    }
+
+    private func settleTextConversationPresentation(
+        shouldPresent: Bool,
+        pageWidth: CGFloat
+    ) {
+        if shouldPresent {
+            if isSoftwareKeyboardVisible {
+                dismissSoftwareKeyboard()
+            }
+            setTextConversationTransitionPhase(.presenting)
+        }
+        isInteractivePageSettling = true
+        withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+            interactivePageDragState.translation = shouldPresent ? -pageWidth : 0
+        } completion: {
+            guard interactivePageTransition == .presentingTextConversation else { return }
+            setWithoutAnimation {
+                if shouldPresent {
+                    isTextConversationPresented = true
+                    cachedTextConversationSnapshot = nil
+                }
+                resetInteractivePageTransition()
+                if shouldPresent {
+                    textConversationTransitionPhase = .idle
+                }
+            }
+            if shouldPresent {
+                scheduleTextConversationSnapshotRefresh()
+            }
+        }
+    }
+
+    private func settleTextConversationDismissal(
+        shouldDismiss: Bool,
+        pageWidth: CGFloat
+    ) {
+        if shouldDismiss {
+            messageFlightDestinationValidationTask?.cancel()
+            messageFlightDestinationValidationTask = nil
+            clearMessageFlightForPageExit()
+            if isSoftwareKeyboardVisible {
+                dismissSoftwareKeyboard()
+            }
+            setTextConversationTransitionPhase(.dismissing)
+        }
+        isInteractivePageSettling = true
+        withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+            interactivePageDragState.translation = shouldDismiss ? pageWidth : 0
+        } completion: {
+            guard interactivePageTransition == .dismissingTextConversation else { return }
+            setWithoutAnimation {
+                if shouldDismiss {
+                    isTextConversationPresented = false
+                } else {
+                    cachedTextConversationSnapshot = nil
+                }
+                resetInteractivePageTransition()
+                if shouldDismiss {
+                    textConversationTransitionPhase = .idle
+                }
+            }
+        }
+    }
+
+    private func resetInteractivePageTransition() {
+        interactivePageTransition = nil
+        interactivePageDragState.translation = 0
+        isInteractivePageSettling = false
+        activeTextConversationSnapshot = nil
+        releaseHomeDashboardInteractionAfterGesture()
+    }
+
+    private func activateTextConversationSnapshotForDismissal() {
+        textConversationSnapshotRefreshTask?.cancel()
+        textConversationSnapshotRefreshTask = nil
+        let snapshot: TextConversationTransitionSnapshot?
+        if activeMessageFlight == nil {
+            snapshot = captureCurrentTextConversationSnapshot()
+                ?? cachedSnapshotForActiveConversation
+        } else {
+            snapshot = nil
+        }
+        setWithoutAnimation {
+            if let snapshot {
+                cachedTextConversationSnapshot = snapshot
+            }
+            activeTextConversationSnapshot = snapshot
+        }
+    }
+
+    private func activateCachedTextConversationSnapshot() {
+        textConversationSnapshotRefreshTask?.cancel()
+        textConversationSnapshotRefreshTask = nil
+        setWithoutAnimation {
+            activeTextConversationSnapshot = activeMessageFlight == nil
+                ? cachedSnapshotForActiveConversation
+                : nil
+        }
+    }
+
+    private func cacheCurrentTextConversationSnapshot() {
+        guard let snapshot = captureCurrentTextConversationSnapshot() else { return }
+        setWithoutAnimation {
+            cachedTextConversationSnapshot = snapshot
+        }
+    }
+
+    private func scheduleTextConversationSnapshotRefresh() {
+        textConversationSnapshotRefreshTask?.cancel()
+        textConversationSnapshotRefreshTask = nil
+        guard isTextConversationPresented,
+              interactivePageTransition == nil,
+              activeMessageFlight == nil,
+              !isSoftwareKeyboardVisible else { return }
+
+        textConversationSnapshotRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(80))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  isTextConversationPresented,
+                  interactivePageTransition == nil,
+                  activeMessageFlight == nil,
+                  !isSoftwareKeyboardVisible else { return }
+            cacheCurrentTextConversationSnapshot()
+            textConversationSnapshotRefreshTask = nil
+        }
+    }
+
+    private var cachedSnapshotForActiveConversation: TextConversationTransitionSnapshot? {
+        guard let snapshot = cachedTextConversationSnapshot,
+              snapshot.conversationID == activeTextChat?.id,
+              let anchor = textConversationSnapshotAnchor,
+              abs(snapshot.pageSize.width - anchor.bounds.width) < 1,
+              abs(snapshot.pageSize.height - anchor.bounds.height) < 1 else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private func captureCurrentTextConversationSnapshot()
+        -> TextConversationTransitionSnapshot? {
+        guard isTextConversationPresented,
+              activeMessageFlight == nil,
+              !isSoftwareKeyboardVisible,
+              let conversationID = activeTextChat?.id,
+              let anchor = textConversationSnapshotAnchor,
+              let window = anchor.window,
+              !anchor.bounds.isEmpty else { return nil }
+
+        let pageRect = anchor.convert(anchor.bounds, to: window)
+        let visibleRect = pageRect.intersection(window.bounds)
+        guard !visibleRect.isNull,
+              visibleRect.width > 0,
+              visibleRect.height > 0,
+              abs(visibleRect.width - pageRect.width) < 1,
+              abs(visibleRect.height - pageRect.height) < 1,
+              let snapshotView = window.resizableSnapshotView(
+                from: visibleRect,
+                afterScreenUpdates: false,
+                withCapInsets: .zero
+              ) else { return nil }
+
+        snapshotView.isUserInteractionEnabled = false
+        return TextConversationTransitionSnapshot(
+            conversationID: conversationID,
+            pageSize: visibleRect.size,
+            contentView: snapshotView
+        )
+    }
+
+    private func suppressHomeDashboardInteraction() {
+        homeDashboardInteractionReleaseTask?.cancel()
+        homeDashboardInteractionReleaseTask = nil
+        setWithoutAnimation {
+            isHomeDashboardInteractionSuppressed = true
+        }
+    }
+
+    private func releaseHomeDashboardInteractionAfterGesture() {
+        homeDashboardInteractionReleaseTask?.cancel()
+        homeDashboardInteractionReleaseTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+            } catch {
+                return
+            }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                isHomeDashboardInteractionSuppressed = false
+            }
+            homeDashboardInteractionReleaseTask = nil
+        }
+    }
+
+    private func setWithoutAnimation(_ updates: () -> Void) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction, updates)
     }
 
     private func isHorizontalSwipe(_ translation: CGSize) -> Bool {
@@ -440,6 +864,8 @@ struct ContentView: View {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            cachedTextConversationSnapshot = nil
+            activeTextConversationSnapshot = nil
             activeTextChat = launch
             isTextConversationPresented = true
         }
@@ -447,6 +873,7 @@ struct ContentView: View {
 
     private func returnToHome() {
         guard textConversationTransitionPhase == .idle else { return }
+        cacheCurrentTextConversationSnapshot()
         messageFlightDestinationValidationTask?.cancel()
         messageFlightDestinationValidationTask = nil
         clearMessageFlightForPageExit()
@@ -526,10 +953,19 @@ struct ContentView: View {
     ) {
         guard textConversationTransitionPhase == phase else { return }
         setTextConversationTransitionPhase(.idle)
+        if phase == .presenting {
+            scheduleTextConversationSnapshotRefresh()
+        }
     }
 
     private var pageTransitionAnimation: Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)
+    }
+
+    private var interactivePageSettleAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.16)
+            : .interactiveSpring(response: 0.32, dampingFraction: 0.9)
     }
 
     private func continueTextConversation(
@@ -548,6 +984,8 @@ struct ContentView: View {
                 var transaction = Transaction(animation: nil)
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
+                    cachedTextConversationSnapshot = nil
+                    activeTextConversationSnapshot = nil
                     activeTextChat = launch
                     isInitialTextChatTransitionComplete = true
                 }
@@ -702,6 +1140,7 @@ struct ContentView: View {
             }
             activeMessageFlight = nil
         }
+        scheduleTextConversationSnapshotRefresh()
     }
 
     private func cancelMessageFlight(id: UUID) {
@@ -736,6 +1175,179 @@ private enum TextConversationTransitionPhase {
     case idle
     case presenting
     case dismissing
+}
+
+private enum InteractivePageTransition {
+    case presentingHistory
+    case dismissingHistory
+    case presentingTextConversation
+    case dismissingTextConversation
+}
+
+@Observable
+private final class InteractivePageDragState {
+    var translation: CGFloat = 0
+}
+
+private enum InteractivePageKind {
+    case history
+    case textConversation
+}
+
+/// Keeps high-frequency drag invalidation at the transform boundary instead of
+/// propagating it through ContentView and the conversation's message hierarchy.
+private struct InteractivePageOffsetModifier: ViewModifier {
+    let page: InteractivePageKind
+    @Bindable var dragState: InteractivePageDragState
+    let transition: InteractivePageTransition?
+    let isPresented: Bool
+    let pageWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        content.offset(x: horizontalOffset)
+    }
+
+    private var horizontalOffset: CGFloat {
+        switch (page, transition) {
+        case (.history, .presentingHistory):
+            return -pageWidth + clamped(
+                dragState.translation,
+                lowerBound: 0,
+                upperBound: pageWidth
+            )
+        case (.history, .dismissingHistory):
+            return clamped(
+                dragState.translation,
+                lowerBound: -pageWidth,
+                upperBound: 0
+            )
+        case (.textConversation, .presentingTextConversation):
+            return pageWidth + clamped(
+                dragState.translation,
+                lowerBound: -pageWidth,
+                upperBound: 0
+            )
+        case (.textConversation, .dismissingTextConversation):
+            return clamped(
+                dragState.translation,
+                lowerBound: 0,
+                upperBound: pageWidth
+            )
+        default:
+            switch page {
+            case .history:
+                return isPresented ? 0 : -pageWidth
+            case .textConversation:
+                return isPresented ? 0 : pageWidth
+            }
+        }
+    }
+
+    private func clamped(
+        _ value: CGFloat,
+        lowerBound: CGFloat,
+        upperBound: CGFloat
+    ) -> CGFloat {
+        min(max(value, lowerBound), upperBound)
+    }
+}
+
+@MainActor
+private final class TextConversationTransitionSnapshot: Identifiable {
+    let id = UUID()
+    let conversationID: UUID
+    let pageSize: CGSize
+    let contentView: UIView
+
+    init(conversationID: UUID, pageSize: CGSize, contentView: UIView) {
+        self.conversationID = conversationID
+        self.pageSize = pageSize
+        self.contentView = contentView
+    }
+}
+
+private struct TextConversationSnapshotAnchor: UIViewRepresentable {
+    let onResolve: @MainActor (UIView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isUserInteractionEnabled = false
+        resolve(view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        resolve(uiView)
+    }
+
+    private func resolve(_ view: UIView) {
+        Task { @MainActor in
+            onResolve(view)
+        }
+    }
+}
+
+private struct TextConversationSnapshotView: UIViewRepresentable {
+    let snapshot: TextConversationTransitionSnapshot
+
+    func makeUIView(context: Context) -> TextConversationSnapshotHostView {
+        let host = TextConversationSnapshotHostView()
+        host.install(snapshot.contentView)
+        return host
+    }
+
+    func updateUIView(
+        _ uiView: TextConversationSnapshotHostView,
+        context: Context
+    ) {
+        uiView.install(snapshot.contentView)
+    }
+
+    static func dismantleUIView(
+        _ uiView: TextConversationSnapshotHostView,
+        coordinator: Void
+    ) {
+        uiView.removeSnapshot()
+    }
+}
+
+@MainActor
+private final class TextConversationSnapshotHostView: UIView {
+    private var snapshotView: UIView?
+
+    init() {
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func install(_ view: UIView) {
+        guard snapshotView !== view else { return }
+        snapshotView?.removeFromSuperview()
+        view.removeFromSuperview()
+        snapshotView = view
+        addSubview(view)
+        setNeedsLayout()
+    }
+
+    func removeSnapshot() {
+        snapshotView?.removeFromSuperview()
+        snapshotView = nil
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        snapshotView?.frame = bounds
+    }
 }
 
 private struct TextChatLaunch: Identifiable, Equatable {
@@ -812,6 +1424,7 @@ private struct HomeDashboard: View {
     let isTextComposerFocused: FocusState<Bool>.Binding
     let realtimeConversationState: RealtimeConversationState
     let voiceVisualDriver: VoiceVisualDriver
+    let isInteractionSuppressed: Bool
     let onTextSend: (TextChatLaunch) -> Void
     let onPrimaryButtonTap: () -> Void
 
@@ -836,7 +1449,10 @@ private struct HomeDashboard: View {
                         HomeTextComposer(
                             isInputFocused: isTextComposerFocused,
                             isInputDisabled: realtimeConversationState.isActive,
-                            onSend: onTextSend
+                            onSend: { launch in
+                                guard !isInteractionSuppressed else { return }
+                                onTextSend(launch)
+                            }
                         )
                         .padding(.top)
                         .padding(.bottom, 12)
@@ -854,7 +1470,11 @@ private struct HomeDashboard: View {
                     .frame(width: artworkWidth)
 
                     if isDetailsExpanded {
-                        SensorReadingGrid(reading: reading, database: database)
+                        SensorReadingGrid(
+                            reading: reading,
+                            database: database,
+                            isInteractionSuppressed: isInteractionSuppressed
+                        )
                             .padding(.top, 12)
                             .transition(sensorGridTransition)
                     }
@@ -864,7 +1484,10 @@ private struct HomeDashboard: View {
                     PrimaryInteractionButton(
                         realtimeConversationState: realtimeConversationState,
                         voiceVisualDriver: voiceVisualDriver,
-                        onTap: onPrimaryButtonTap
+                        onTap: {
+                            guard !isInteractionSuppressed else { return }
+                            onPrimaryButtonTap()
+                        }
                     )
                     .frame(width: actionButtonWidth)
                     .padding(.bottom)
@@ -904,6 +1527,7 @@ private struct HomeDashboard: View {
     }
 
     private func toggleDetails() {
+        guard !isInteractionSuppressed else { return }
         withAnimation(layoutAnimation) {
             isDetailsExpanded.toggle()
         }
@@ -1111,6 +1735,7 @@ struct InitialMessageTransitionSurface<Content: View>: View {
 private struct SensorReadingGrid: View {
     let reading: PlantReading?
     let database: PlantDatabase
+    let isInteractionSuppressed: Bool
 
     @State private var selectedMetric: SensorMetric?
 
@@ -1123,6 +1748,7 @@ private struct SensorReadingGrid: View {
         LazyVGrid(columns: columns, spacing: 12) {
             ForEach(metrics) { metric in
                 SensorMetricCard(metric: metric) {
+                    guard !isInteractionSuppressed else { return }
                     selectedMetric = metric
                 }
             }
@@ -1496,6 +2122,7 @@ private struct HomeDashboardPreview: View {
             isTextComposerFocused: $isTextComposerFocused,
             realtimeConversationState: .idle,
             voiceVisualDriver: VoiceVisualDriver(),
+            isInteractionSuppressed: false,
             onTextSend: { _ in },
             onPrimaryButtonTap: {}
         )

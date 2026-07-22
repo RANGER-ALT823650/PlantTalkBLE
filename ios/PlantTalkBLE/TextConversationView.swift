@@ -701,7 +701,6 @@ struct TextConversationView: View {
                 .padding(.top)
             }
             .trackConversationBottom($isScrolledToBottom)
-            .pauseStreamingPresentationWhileScrolling(streamingAssistantState)
             .plantTalkBottomBar {
                 if isComposerVisible {
                     inputBar
@@ -2344,27 +2343,6 @@ private extension View {
     func trackConversationBottom(_ isAtBottom: Binding<Bool>) -> some View {
         modifier(ConversationBottomTrackingModifier(isAtBottom: isAtBottom))
     }
-
-    func pauseStreamingPresentationWhileScrolling(
-        _ state: StreamingAssistantState
-    ) -> some View {
-        modifier(StreamingPresentationScrollModifier(state: state))
-    }
-}
-
-private struct StreamingPresentationScrollModifier: ViewModifier {
-    let state: StreamingAssistantState
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, *) {
-            content.onScrollPhaseChange { _, phase in
-                state.setPresentationUpdatesPaused(phase.isScrolling)
-            }
-        } else {
-            content
-        }
-    }
 }
 
 @MainActor
@@ -2397,7 +2375,6 @@ private final class StreamingAssistantState {
     @ObservationIgnored private var bufferedDelta = ""
     @ObservationIgnored private var bufferedToolInvocations: [ToolInvocation] = []
     @ObservationIgnored private var scheduledFlush: Task<Void, Never>?
-    @ObservationIgnored private var presentationUpdatesPaused = false
 
     var hasVisibleContent: Bool {
         let displayedContent = message?.content ?? ""
@@ -2429,7 +2406,7 @@ private final class StreamingAssistantState {
         // Show the first visible token immediately. Subsequent tiny deltas are
         // coalesced so Markdown parsing and TextKit layout do not run once per
         // network event.
-        if !hadVisibleContent && !presentationUpdatesPaused {
+        if !hadVisibleContent {
             flushBufferedDelta()
         } else {
             scheduleFlushIfNeeded()
@@ -2455,19 +2432,8 @@ private final class StreamingAssistantState {
         return finalized
     }
 
-    func setPresentationUpdatesPaused(_ isPaused: Bool) {
-        guard presentationUpdatesPaused != isPaused else { return }
-        presentationUpdatesPaused = isPaused
-        if isPaused {
-            scheduledFlush?.cancel()
-            scheduledFlush = nil
-        } else {
-            flushBufferedDelta()
-        }
-    }
-
     private func scheduleFlushIfNeeded() {
-        guard !presentationUpdatesPaused, scheduledFlush == nil else { return }
+        guard scheduledFlush == nil else { return }
         scheduledFlush = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(80))
@@ -2481,8 +2447,7 @@ private final class StreamingAssistantState {
     }
 
     private func flushBufferedDelta() {
-        guard !presentationUpdatesPaused,
-              !bufferedDelta.isEmpty,
+        guard !bufferedDelta.isEmpty,
               var updated = message else { return }
         scheduledFlush?.cancel()
         scheduledFlush = nil
