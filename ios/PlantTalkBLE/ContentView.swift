@@ -96,6 +96,7 @@ struct ContentView: View {
     @State private var realtimeConversation: QwenRealtimeConversation
     @State private var isRealtimeTranscriptPresented = false
     @State private var isHistoryOverviewPresented = false
+    @State private var isHistoryDetailPresented = false
     @State private var isPlantDetailsExpanded = false
     @State private var activeTextChat: TextChatLaunch?
     @State private var isTextConversationPresented = false
@@ -178,7 +179,10 @@ struct ContentView: View {
                     HistoryOverviewView(
                         database: database,
                         onContinueTextConversation: continueTextConversation,
-                        onContinueRealtimeConversation: continueRealtimeConversation
+                        onContinueRealtimeConversation: continueRealtimeConversation,
+                        onDetailPresentationChanged: { isPresented in
+                            isHistoryDetailPresented = isPresented
+                        }
                     )
                         .background(Color(uiColor: .systemBackground))
                         .toolbar {
@@ -348,7 +352,8 @@ struct ContentView: View {
     private var hideHistoryGesture: some Gesture {
         DragGesture(minimumDistance: 24)
             .onEnded { value in
-                guard isHorizontalSwipe(value.translation),
+                guard !isHistoryDetailPresented,
+                      isHorizontalSwipe(value.translation),
                       value.translation.width < -70 else { return }
                 hideHistoryOverview()
             }
@@ -369,6 +374,7 @@ struct ContentView: View {
         withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
             isHistoryOverviewPresented = false
         }
+        isHistoryDetailPresented = false
     }
 
     private var bluetoothSymbol: String {

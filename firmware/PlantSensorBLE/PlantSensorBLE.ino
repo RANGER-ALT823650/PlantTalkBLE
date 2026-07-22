@@ -71,6 +71,8 @@ Preferences sequencePreferences;
 
 bool sht31Ready = false;
 bool bh1750Ready = false;
+const char *i2cPinTestResult = "not run";
+uint8_t lastI2CAddressFound = 0;
 volatile bool clientConnected = false;
 volatile bool advertisingRestartPending = false;
 volatile unsigned long advertisingRestartRequestedAt = 0;
@@ -428,19 +430,60 @@ bool appendHistoryRecord(const SensorSample &sample) {
 }
 
 // ---------- Sensors ----------
-void scanI2C() {
+uint8_t scanI2C() {
   Serial.println("Scanning I2C bus...");
   uint8_t count = 0;
+  lastI2CAddressFound = 0;
   for (uint8_t address = 1; address < 127; ++address) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
       Serial.printf("I2C device found at 0x%02X\n", address);
+      lastI2CAddressFound = address;
       ++count;
     }
   }
   if (count == 0) {
     Serial.println("No I2C devices found. Check wiring.");
   }
+  return count;
+}
+
+void selectI2CPinOrder() {
+  // Give the serial monitor time to attach after the upload-triggered reset.
+  delay(3000);
+  Serial.printf(
+    "I2C test A: SDA=D%u, SCL=D%u\n",
+    I2C_SDA_PIN,
+    I2C_SCL_PIN
+  );
+  if (scanI2C() > 0) {
+    i2cPinTestResult = "A: SDA=D21, SCL=D22";
+    Serial.println("I2C test A selected.");
+    return;
+  }
+
+  Wire.end();
+  delay(20);
+  Wire.begin(I2C_SCL_PIN, I2C_SDA_PIN);
+  Wire.setClock(100000);
+  Serial.printf(
+    "I2C test B: SDA=D%u, SCL=D%u (swapped)\n",
+    I2C_SCL_PIN,
+    I2C_SDA_PIN
+  );
+  if (scanI2C() > 0) {
+    i2cPinTestResult = "B: SDA=D22, SCL=D21";
+    Serial.println("I2C test B selected.");
+    return;
+  }
+
+  // Leave the bus in its documented pin order when neither test responds.
+  Wire.end();
+  delay(20);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(100000);
+  i2cPinTestResult = "none: A and B both found no device";
+  Serial.println("Neither I2C pin order found a device; restored test A order.");
 }
 
 void initializeSensors() {
@@ -509,6 +552,11 @@ void publishLiveReading(const SensorSample &sample) {
 
 void sampleStoreAndPublish() {
   const SensorSample sample = readSensors();
+  Serial.printf(
+    "I2C pin test result: %s; last address: 0x%02X\n",
+    i2cPinTestResult,
+    lastI2CAddressFound
+  );
   Serial.printf("Temp: %.1f C\n", sample.temperature);
   Serial.printf("Air Humidity: %.1f %%\n", sample.humidity);
   if (sample.flags & FLAG_BH1750_VALID) {
@@ -838,7 +886,7 @@ void setup() {
     : buildUnixTime();
   setSystemClock(startupTime, true);
 
-  scanI2C();
+  selectI2CPinOrder();
   initializeSensors();
   initializeBLE();
 

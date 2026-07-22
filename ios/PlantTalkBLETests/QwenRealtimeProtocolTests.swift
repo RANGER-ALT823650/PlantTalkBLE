@@ -1,5 +1,7 @@
 import AVFAudio
 import Foundation
+import ImageIO
+import UIKit
 import XCTest
 @testable import PlantTalkBLE
 
@@ -217,6 +219,102 @@ final class QwenRealtimeProtocolTests: XCTestCase {
         XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: responseCreate))
     }
 
+    func testVisualFrameUsesQwenImageBufferEvent() throws {
+        let imageData = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let event = QwenRealtimeToolProtocol.imageAppendEvent(
+            eventID: "event_image_1",
+            imageData: imageData
+        )
+
+        XCTAssertEqual(event["event_id"] as? String, "event_image_1")
+        XCTAssertEqual(event["type"] as? String, "input_image_buffer.append")
+        XCTAssertEqual(event["image"] as? String, imageData.base64EncodedString())
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: event))
+    }
+
+    func testVisualFrameIsPrimedBySilentAudioInTheSameOrderedBatch() throws {
+        let imageData = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let events = QwenRealtimeToolProtocol.visualInputEvents(
+            eventIDPrefix: "event_visual_1",
+            imageData: imageData
+        )
+
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events[0]["event_id"] as? String, "event_visual_1_audio")
+        XCTAssertEqual(events[0]["type"] as? String, "input_audio_buffer.append")
+        let encodedAudio = try XCTUnwrap(events[0]["audio"] as? String)
+        let audio = try XCTUnwrap(Data(base64Encoded: encodedAudio))
+        XCTAssertEqual(audio.count, QwenRealtimeToolProtocol.visualPrimingPCMByteCount)
+        XCTAssertTrue(audio.allSatisfy { $0 == 0 })
+
+        XCTAssertEqual(events[1]["event_id"] as? String, "event_visual_1_image")
+        XCTAssertEqual(events[1]["type"] as? String, "input_image_buffer.append")
+        XCTAssertEqual(events[1]["image"] as? String, imageData.base64EncodedString())
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: events))
+    }
+
+    func testRealtimeVisualEntryMapsToTheSharedImageBubblePayload() {
+        let image = ChatImageAttachment(
+            id: "realtime-image-1",
+            mimeType: "image/jpeg",
+            data: Data([0xFF, 0xD8, 0xFF, 0xD9])
+        )
+        let entry = RealtimeTranscriptEntry(
+            id: UUID(),
+            role: .user,
+            text: "",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            imageAttachments: [image],
+            toolInvocations: []
+        )
+
+        let message = entry.chatMessage
+        XCTAssertEqual(message.role, .user)
+        XCTAssertEqual(message.content, "")
+        XCTAssertEqual(message.imageAttachments, [image])
+    }
+
+    func testBargeInRequiresSpeechToDominateCurrentPlayback() {
+        XCTAssertEqual(
+            RealtimeBargeInPolicy.requiredInputLevel(responseLevelDBFS: -18),
+            -15
+        )
+        XCTAssertLessThan(
+            -24,
+            RealtimeBargeInPolicy.requiredInputLevel(responseLevelDBFS: -18)
+        )
+        XCTAssertEqual(
+            RealtimeBargeInPolicy.requiredInputLevel(responseLevelDBFS: -40),
+            -24
+        )
+        XCTAssertEqual(
+            RealtimeBargeInPolicy.requiredInputLevel(responseLevelDBFS: -4),
+            -10
+        )
+        XCTAssertEqual(RealtimeBargeInPolicy.requiredDuration, 0.28)
+    }
+
+    @MainActor
+    func testStillImageEncodingFitsRealtimeFrameLimits() throws {
+        let image = UIGraphicsImageRenderer(
+            size: CGSize(width: 2_000, height: 1_000)
+        ).image { context in
+            UIColor.systemGreen.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 2_000, height: 1_000))
+        }
+        let attachment = ConversationImageAttachment(id: "test-image", image: image)
+        let data = try attachment.encodedRealtimeImage()
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        )
+        let width = try XCTUnwrap(properties[kCGImagePropertyPixelWidth] as? Int)
+        let height = try XCTUnwrap(properties[kCGImagePropertyPixelHeight] as? Int)
+
+        XCTAssertLessThanOrEqual(data.count, RealtimeVisualFrameEncoder.maximumJPEGByteCount)
+        XCTAssertLessThanOrEqual(max(width, height), 1_280)
+    }
+
     func testFunctionCallCompletionRequiresProtocolFields() throws {
         let missingCallID = try JSONDecoder().decode(
             QwenRealtimeServerEvent.self,
@@ -301,6 +399,7 @@ final class QwenRealtimeProtocolTests: XCTestCase {
 
         XCTAssertEqual(event["type"] as? String, "session.update")
         let session = try XCTUnwrap(event["session"] as? [String: Any])
+        XCTAssertEqual(session["modalities"] as? [String], ["text", "audio"])
         let encodedTools = try XCTUnwrap(session["tools"] as? [[String: Any]])
         let summaryTool = try XCTUnwrap(encodedTools.first { tool in
             let function = tool["function"] as? [String: Any]
@@ -335,6 +434,9 @@ final class QwenRealtimeProtocolTests: XCTestCase {
         XCTAssertTrue(instructions.contains("不要要求用户重复说明"))
         XCTAssertTrue(instructions.contains("用户希望被称为小凡"))
         XCTAssertTrue(instructions.contains("get_sensor_summary"))
+        XCTAssertTrue(instructions.contains("支持用户上传图片和共享摄像头画面"))
+        XCTAssertTrue(instructions.contains("不要因为“植物传感器”的角色设定而声称自己看不到图片"))
+        XCTAssertTrue(instructions.contains("视觉观察与 BLE 传感器数据是两类独立信息"))
     }
 
     func testReplacingExistingModelDoesNotDuplicateQueryItem() throws {

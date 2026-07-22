@@ -701,6 +701,7 @@ struct TextConversationView: View {
                 .padding(.top)
             }
             .trackConversationBottom($isScrolledToBottom)
+            .pauseStreamingPresentationWhileScrolling(streamingAssistantState)
             .plantTalkBottomBar {
                 if isComposerVisible {
                     inputBar
@@ -1884,7 +1885,7 @@ struct TextConversationView: View {
                 )
                 streamingAssistantState.attachToolInvocations(invocations)
 
-                guard let assistant = streamingAssistantState.message,
+                guard let assistant = streamingAssistantState.finalizedMessage(),
                       streamingAssistantState.hasVisibleContent else {
                     streamingAssistantState.clear()
                     throw AIClientError.emptyResponse
@@ -1898,7 +1899,7 @@ struct TextConversationView: View {
                 )
                 commitStreamingAssistant(assistant)
             } catch {
-                if let assistant = streamingAssistantState.message,
+                if let assistant = streamingAssistantState.finalizedMessage(),
                    streamingAssistantState.hasVisibleContent {
                     try? await database.saveChatMessage(assistant)
                     if !Task.isCancelled {
@@ -2343,6 +2344,27 @@ private extension View {
     func trackConversationBottom(_ isAtBottom: Binding<Bool>) -> some View {
         modifier(ConversationBottomTrackingModifier(isAtBottom: isAtBottom))
     }
+
+    func pauseStreamingPresentationWhileScrolling(
+        _ state: StreamingAssistantState
+    ) -> some View {
+        modifier(StreamingPresentationScrollModifier(state: state))
+    }
+}
+
+private struct StreamingPresentationScrollModifier: ViewModifier {
+    let state: StreamingAssistantState
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                state.setPresentationUpdatesPaused(phase.isScrolling)
+            }
+        } else {
+            content
+        }
+    }
 }
 
 @MainActor
@@ -2372,12 +2394,19 @@ private final class AssistantPresentationState {
 @Observable
 private final class StreamingAssistantState {
     private(set) var message: ChatMessage?
+    @ObservationIgnored private var bufferedDelta = ""
+    @ObservationIgnored private var bufferedToolInvocations: [ToolInvocation] = []
+    @ObservationIgnored private var scheduledFlush: Task<Void, Never>?
+    @ObservationIgnored private var presentationUpdatesPaused = false
 
     var hasVisibleContent: Bool {
-        guard let message else { return false }
-        return !message.content
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty
+        let displayedContent = message?.content ?? ""
+        return !displayedContent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            || !bufferedDelta
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
     }
 
     var visibleMessage: ChatMessage? {
@@ -2385,23 +2414,81 @@ private final class StreamingAssistantState {
     }
 
     func begin(_ message: ChatMessage) {
+        scheduledFlush?.cancel()
+        scheduledFlush = nil
+        bufferedDelta = ""
+        bufferedToolInvocations = []
         self.message = message
     }
 
     func append(_ delta: String) {
-        guard var message else { return }
-        message.content += delta
-        self.message = message
+        guard message != nil, !delta.isEmpty else { return }
+        let hadVisibleContent = hasVisibleContent
+        bufferedDelta += delta
+
+        // Show the first visible token immediately. Subsequent tiny deltas are
+        // coalesced so Markdown parsing and TextKit layout do not run once per
+        // network event.
+        if !hadVisibleContent && !presentationUpdatesPaused {
+            flushBufferedDelta()
+        } else {
+            scheduleFlushIfNeeded()
+        }
     }
 
     func clear() {
+        scheduledFlush?.cancel()
+        scheduledFlush = nil
+        bufferedDelta = ""
+        bufferedToolInvocations = []
         message = nil
     }
 
     func attachToolInvocations(_ invocations: [ToolInvocation]) {
-        guard var message else { return }
-        message.toolInvocations = invocations
-        self.message = message
+        bufferedToolInvocations = invocations
+    }
+
+    func finalizedMessage() -> ChatMessage? {
+        guard var finalized = message else { return nil }
+        finalized.content += bufferedDelta
+        finalized.toolInvocations = bufferedToolInvocations
+        return finalized
+    }
+
+    func setPresentationUpdatesPaused(_ isPaused: Bool) {
+        guard presentationUpdatesPaused != isPaused else { return }
+        presentationUpdatesPaused = isPaused
+        if isPaused {
+            scheduledFlush?.cancel()
+            scheduledFlush = nil
+        } else {
+            flushBufferedDelta()
+        }
+    }
+
+    private func scheduleFlushIfNeeded() {
+        guard !presentationUpdatesPaused, scheduledFlush == nil else { return }
+        scheduledFlush = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(80))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.scheduledFlush = nil
+            self.flushBufferedDelta()
+        }
+    }
+
+    private func flushBufferedDelta() {
+        guard !presentationUpdatesPaused,
+              !bufferedDelta.isEmpty,
+              var updated = message else { return }
+        scheduledFlush?.cancel()
+        scheduledFlush = nil
+        updated.content += bufferedDelta
+        bufferedDelta = ""
+        message = updated
     }
 }
 
@@ -2418,6 +2505,10 @@ private struct StreamingAssistantMessageRow: View {
                let message = state.visibleMessage {
                 ChatMessageBubble(message: message)
                     .transition(.opacity)
+                    .transaction { transaction in
+                        transaction.animation = nil
+                        transaction.disablesAnimations = true
+                    }
             }
         }
     }
@@ -2496,6 +2587,7 @@ struct ChatMessageBubble: View {
                 ChatBubbleSurface(role: message.role) {
                     ChatBubblePayload(
                         text: message.content,
+                        rendersMarkdown: message.role == .assistant,
                         imageAttachments: message.imageAttachments,
                         activeImagePreviewSourceID: activeImagePreviewSourceID,
                         onImagePreview: onImagePreview,
@@ -2539,6 +2631,7 @@ private struct UserBubbleFlightPlaceholder: View {
 
 private struct ChatBubblePayload: View {
     let text: String
+    let rendersMarkdown: Bool
     let imageAttachments: [ChatImageAttachment]
     let activeImagePreviewSourceID: String?
     let onImagePreview: ConversationImagePreviewAction?
@@ -2547,6 +2640,7 @@ private struct ChatBubblePayload: View {
 
     init(
         text: String,
+        rendersMarkdown: Bool = false,
         imageAttachments: [ChatImageAttachment] = [],
         activeImagePreviewSourceID: String? = nil,
         onImagePreview: ConversationImagePreviewAction? = nil,
@@ -2554,6 +2648,7 @@ private struct ChatBubblePayload: View {
         toolInvocations: [ToolInvocation] = []
     ) {
         self.text = text
+        self.rendersMarkdown = rendersMarkdown
         self.imageAttachments = imageAttachments
         self.activeImagePreviewSourceID = activeImagePreviewSourceID
         self.onImagePreview = onImagePreview
@@ -2572,7 +2667,10 @@ private struct ChatBubblePayload: View {
             }
 
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SelectableMessageText(text: text)
+                SelectableMessageText(
+                    text: text,
+                    rendersMarkdown: rendersMarkdown
+                )
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -2589,11 +2687,452 @@ private struct ChatBubblePayload: View {
     }
 }
 
+/// Converts the block syntax commonly returned by chat models into one
+/// selectable attributed string. Keeping a single `UITextView` preserves the
+/// native long-press selection and edit menu used by conversation bubbles.
+private enum MarkdownMessageRenderer {
+    static var bodyAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: UIFont.preferredFont(forTextStyle: .body),
+            .foregroundColor: UIColor.label
+        ]
+    }
+
+    static func render(_ markdown: String, width: CGFloat) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        let lines = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        var index = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if let fence = codeFence(in: trimmed) {
+                index += 1
+                var codeLines: [String] = []
+                while index < lines.count,
+                      !lines[index]
+                        .trimmingCharacters(in: .whitespaces)
+                        .hasPrefix(fence) {
+                    codeLines.append(lines[index])
+                    index += 1
+                }
+                if index < lines.count { index += 1 }
+                appendCode(codeLines.joined(separator: "\n"), to: output)
+                continue
+            }
+
+            if index + 1 < lines.count,
+               isTableSeparator(lines[index + 1]),
+               let header = tableCells(in: line),
+               header.count > 1 {
+                var rows: [[String]] = [header]
+                index += 2
+                while index < lines.count,
+                      let cells = tableCells(in: lines[index]),
+                      cells.count > 1,
+                      !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                    rows.append(cells)
+                    index += 1
+                }
+                appendTable(rows, width: width, to: output)
+                continue
+            }
+
+            if trimmed.isEmpty {
+                appendBlankLine(to: output)
+                index += 1
+                continue
+            }
+
+            if let heading = heading(in: trimmed) {
+                appendInline(
+                    heading.text,
+                    font: headingFont(level: heading.level),
+                    paragraphStyle: paragraphStyle(
+                        spacingBefore: output.length == 0 ? 0 : 7,
+                        spacingAfter: 5
+                    ),
+                    forceBold: true,
+                    to: output
+                )
+                appendNewline(to: output)
+                index += 1
+                continue
+            }
+
+            if isThematicBreak(trimmed) {
+                let rule = NSAttributedString(
+                    string: "────────────────────",
+                    attributes: [
+                        .font: UIFont.preferredFont(forTextStyle: .caption1),
+                        .foregroundColor: UIColor.separator,
+                        .paragraphStyle: paragraphStyle(
+                            spacingBefore: 5,
+                            spacingAfter: 6
+                        )
+                    ]
+                )
+                output.append(rule)
+                appendNewline(to: output)
+                index += 1
+                continue
+            }
+
+            if let item = listItem(in: line) {
+                let indent = CGFloat(item.depth) * 16
+                let style = paragraphStyle(spacingAfter: 3)
+                style.firstLineHeadIndent = indent
+                style.headIndent = indent + 22
+                style.tabStops = [NSTextTab(
+                    textAlignment: .left,
+                    location: indent + 22
+                )]
+                appendPlain("\(item.marker)\t", style: style, to: output)
+                appendInline(
+                    item.text,
+                    font: .preferredFont(forTextStyle: .body),
+                    paragraphStyle: style,
+                    to: output
+                )
+                appendNewline(style: style, to: output)
+                index += 1
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                let quoted = String(trimmed.dropFirst())
+                    .trimmingCharacters(in: .whitespaces)
+                let style = paragraphStyle(spacingAfter: 4)
+                style.firstLineHeadIndent = 0
+                style.headIndent = 17
+                style.tabStops = [NSTextTab(
+                    textAlignment: .left,
+                    location: 17
+                )]
+                appendPlain(
+                    "│\t",
+                    style: style,
+                    color: .tertiaryLabel,
+                    to: output
+                )
+                appendInline(
+                    quoted,
+                    font: .preferredFont(forTextStyle: .body),
+                    paragraphStyle: style,
+                    color: .secondaryLabel,
+                    to: output
+                )
+                appendNewline(style: style, to: output)
+                index += 1
+                continue
+            }
+
+            appendInline(
+                line,
+                font: .preferredFont(forTextStyle: .body),
+                paragraphStyle: paragraphStyle(spacingAfter: 4),
+                to: output
+            )
+            appendNewline(to: output)
+            index += 1
+        }
+
+        while output.string.hasSuffix("\n") {
+            output.deleteCharacters(in: NSRange(location: output.length - 1, length: 1))
+        }
+        return output
+    }
+
+    private static func appendInline(
+        _ source: String,
+        font: UIFont,
+        paragraphStyle: NSParagraphStyle,
+        color: UIColor = .label,
+        forceBold: Bool = false,
+        to output: NSMutableAttributedString
+    ) {
+        let parsed: AttributedString
+        do {
+            parsed = try AttributedString(
+                markdown: source,
+                options: .init(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                    failurePolicy: .returnPartiallyParsedIfPossible
+                )
+            )
+        } catch {
+            appendPlain(
+                source,
+                font: font,
+                style: paragraphStyle,
+                color: color,
+                forceBold: forceBold,
+                to: output
+            )
+            return
+        }
+
+        for run in parsed.runs {
+            let content = String(parsed[run.range].characters)
+            let intent = run.inlinePresentationIntent
+            var runFont = font
+            var traits: UIFontDescriptor.SymbolicTraits = []
+            if forceBold || intent?.contains(.stronglyEmphasized) == true {
+                traits.insert(.traitBold)
+            }
+            if intent?.contains(.emphasized) == true {
+                traits.insert(.traitItalic)
+            }
+            if !traits.isEmpty,
+               let descriptor = font.fontDescriptor.withSymbolicTraits(traits) {
+                runFont = UIFont(descriptor: descriptor, size: font.pointSize)
+            }
+            if intent?.contains(.code) == true {
+                runFont = .monospacedSystemFont(
+                    ofSize: font.pointSize * 0.92,
+                    weight: forceBold ? .semibold : .regular
+                )
+            }
+
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: runFont,
+                .foregroundColor: run.link == nil ? color : UIColor.tintColor,
+                .paragraphStyle: paragraphStyle
+            ]
+            if intent?.contains(.code) == true {
+                attributes[.backgroundColor] = UIColor.secondarySystemFill
+            }
+            if intent?.contains(.strikethrough) == true {
+                attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            }
+            if let link = run.link {
+                attributes[.link] = link
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
+            output.append(NSAttributedString(string: content, attributes: attributes))
+        }
+    }
+
+    private static func appendTable(
+        _ rows: [[String]],
+        width: CGFloat,
+        to output: NSMutableAttributedString
+    ) {
+        let columnCount = max(rows.map(\.count).max() ?? 2, 2)
+        let usableWidth = max(width - 4, 160)
+        let style = paragraphStyle(spacingAfter: 3)
+        style.tabStops = (1..<columnCount).map { column in
+            NSTextTab(
+                textAlignment: .left,
+                location: usableWidth * CGFloat(column) / CGFloat(columnCount)
+            )
+        }
+        style.defaultTabInterval = usableWidth / CGFloat(columnCount)
+
+        for (rowIndex, row) in rows.enumerated() {
+            for column in 0..<columnCount {
+                if column > 0 { appendPlain("\t", style: style, to: output) }
+                appendInline(
+                    column < row.count ? row[column] : "",
+                    font: .preferredFont(forTextStyle: .subheadline),
+                    paragraphStyle: style,
+                    forceBold: rowIndex == 0,
+                    to: output
+                )
+            }
+            appendNewline(style: style, to: output)
+            if rowIndex == 0 {
+                let separator = String(repeating: "─", count: 26)
+                appendPlain(
+                    separator,
+                    font: .preferredFont(forTextStyle: .caption2),
+                    style: style,
+                    color: .separator,
+                    to: output
+                )
+                appendNewline(style: style, to: output)
+            }
+        }
+    }
+
+    private static func appendCode(
+        _ code: String,
+        to output: NSMutableAttributedString
+    ) {
+        let style = paragraphStyle(spacingBefore: 5, spacingAfter: 7)
+        style.firstLineHeadIndent = 9
+        style.headIndent = 9
+        style.tailIndent = -9
+        output.append(NSAttributedString(
+            string: code,
+            attributes: [
+                .font: UIFont.monospacedSystemFont(
+                    ofSize: UIFont.preferredFont(forTextStyle: .body).pointSize * 0.9,
+                    weight: .regular
+                ),
+                .foregroundColor: UIColor.label,
+                .backgroundColor: UIColor.secondarySystemFill,
+                .paragraphStyle: style
+            ]
+        ))
+        appendNewline(style: style, to: output)
+    }
+
+    private static func appendPlain(
+        _ text: String,
+        font: UIFont = .preferredFont(forTextStyle: .body),
+        style: NSParagraphStyle,
+        color: UIColor = .label,
+        forceBold: Bool = false,
+        to output: NSMutableAttributedString
+    ) {
+        let renderedFont: UIFont
+        if forceBold,
+           let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
+            renderedFont = UIFont(descriptor: descriptor, size: font.pointSize)
+        } else {
+            renderedFont = font
+        }
+        output.append(NSAttributedString(
+            string: text,
+            attributes: [
+                .font: renderedFont,
+                .foregroundColor: color,
+                .paragraphStyle: style
+            ]
+        ))
+    }
+
+    private static func appendNewline(
+        style: NSParagraphStyle = paragraphStyle(),
+        to output: NSMutableAttributedString
+    ) {
+        appendPlain("\n", style: style, to: output)
+    }
+
+    private static func appendBlankLine(to output: NSMutableAttributedString) {
+        guard output.length > 0, !output.string.hasSuffix("\n\n") else { return }
+        appendNewline(to: output)
+    }
+
+    private static func paragraphStyle(
+        spacingBefore: CGFloat = 0,
+        spacingAfter: CGFloat = 0
+    ) -> NSMutableParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = spacingBefore
+        style.paragraphSpacing = spacingAfter
+        style.lineBreakMode = .byWordWrapping
+        return style
+    }
+
+    private static func headingFont(level: Int) -> UIFont {
+        let textStyle: UIFont.TextStyle
+        switch level {
+        case 1: textStyle = .title2
+        case 2: textStyle = .title3
+        case 3: textStyle = .headline
+        default: textStyle = .subheadline
+        }
+        return UIFont.preferredFont(forTextStyle: textStyle)
+    }
+
+    private static func heading(in line: String) -> (level: Int, text: String)? {
+        let hashes = line.prefix { $0 == "#" }.count
+        guard (1...6).contains(hashes),
+              line.dropFirst(hashes).first == " " else { return nil }
+        return (hashes, String(line.dropFirst(hashes + 1)))
+    }
+
+    private static func codeFence(in line: String) -> String? {
+        if line.hasPrefix("```") { return "```" }
+        if line.hasPrefix("~~~") { return "~~~" }
+        return nil
+    }
+
+    private static func listItem(
+        in line: String
+    ) -> (depth: Int, marker: String, text: String)? {
+        let indentation = line.prefix { $0 == " " || $0 == "\t" }.count
+        let content = line.dropFirst(indentation)
+        let depth = indentation / 2
+        for marker in ["- ", "* ", "+ "] where content.hasPrefix(marker) {
+            return (depth, "•", String(content.dropFirst(marker.count)))
+        }
+
+        let digits = content.prefix { $0.isNumber }
+        guard !digits.isEmpty else { return nil }
+        let remainder = content.dropFirst(digits.count)
+        guard remainder.hasPrefix(". ") || remainder.hasPrefix(") ") else {
+            return nil
+        }
+        return (
+            depth,
+            "\(digits).",
+            String(remainder.dropFirst(2))
+        )
+    }
+
+    private static func isThematicBreak(_ line: String) -> Bool {
+        let compact = line.replacingOccurrences(of: " ", with: "")
+        guard compact.count >= 3, let first = compact.first,
+              first == "-" || first == "*" || first == "_" else { return false }
+        return compact.allSatisfy { $0 == first }
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        guard let cells = tableCells(in: line), cells.count > 1 else {
+            return false
+        }
+        return cells.allSatisfy { cell in
+            let value = cell.trimmingCharacters(in: .whitespaces)
+            let core = value.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            return core.count >= 3 && core.allSatisfy { $0 == "-" }
+        }
+    }
+
+    private static func tableCells(in line: String) -> [String]? {
+        guard line.contains("|") else { return nil }
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        for character in line {
+            if escaped {
+                current.append(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        if escaped { current.append("\\") }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        if cells.first?.isEmpty == true { cells.removeFirst() }
+        if cells.last?.isEmpty == true { cells.removeLast() }
+        return cells.count > 1 ? cells : nil
+    }
+}
+
 /// UIKit owns the selection gestures and edit menu here. SwiftUI's
 /// `textSelection` is not reliable inside the conversation's nested glass and
 /// scrolling hierarchy on a physical device.
 private struct SelectableMessageText: UIViewRepresentable {
     let text: String
+    let rendersMarkdown: Bool
+
+    init(text: String, rendersMarkdown: Bool = false) {
+        self.text = text
+        self.rendersMarkdown = rendersMarkdown
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -2618,11 +3157,12 @@ private struct SelectableMessageText: UIViewRepresentable {
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        textView.font = .preferredFont(forTextStyle: .body)
-        textView.textColor = .label
-        if textView.text != text {
-            textView.text = text
-        }
+        context.coordinator.update(
+            textView,
+            text: text,
+            rendersMarkdown: rendersMarkdown,
+            width: textView.bounds.width
+        )
     }
 
     func sizeThatFits(
@@ -2630,27 +3170,21 @@ private struct SelectableMessageText: UIViewRepresentable {
         uiView textView: UITextView,
         context: Context
     ) -> CGSize? {
-        guard let proposedWidth = proposal.width,
-              proposedWidth > 0,
-              let font = textView.font else {
+        guard let proposedWidth = proposal.width, proposedWidth > 0 else {
             return nil
         }
 
-        let textBounds = (textView.text as NSString).boundingRect(
-            with: CGSize(
-                width: proposedWidth,
-                height: CGFloat.greatestFiniteMagnitude
-            ),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font],
-            context: nil
+        context.coordinator.update(
+            textView,
+            text: text,
+            rendersMarkdown: rendersMarkdown,
+            width: proposedWidth
         )
-        let fittedWidth = min(proposedWidth, max(ceil(textBounds.width), 1))
-        let fittedSize = textView.sizeThatFits(CGSize(
-            width: fittedWidth,
-            height: CGFloat.greatestFiniteMagnitude
-        ))
-        return CGSize(width: fittedWidth, height: ceil(fittedSize.height))
+
+        return context.coordinator.fittedSize(
+            for: textView,
+            proposedWidth: proposedWidth
+        )
     }
 
     static func dismantleUIView(
@@ -2662,6 +3196,73 @@ private struct SelectableMessageText: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
+        private var renderedText: String?
+        private var renderedAsMarkdown = false
+        private var renderedWidth: CGFloat = 0
+        private var cachedMeasurement: (width: CGFloat, size: CGSize)?
+
+        func update(
+            _ textView: UITextView,
+            text: String,
+            rendersMarkdown: Bool,
+            width: CGFloat
+        ) {
+            let normalizedWidth = width > 0 ? width : 320
+            let widthChanged = abs(renderedWidth - normalizedWidth) > 0.5
+            guard renderedText != text
+                    || renderedAsMarkdown != rendersMarkdown
+                    || (rendersMarkdown && widthChanged) else { return }
+
+            renderedText = text
+            renderedAsMarkdown = rendersMarkdown
+            renderedWidth = normalizedWidth
+            cachedMeasurement = nil
+            if rendersMarkdown {
+                textView.attributedText = MarkdownMessageRenderer.render(
+                    text,
+                    width: normalizedWidth
+                )
+            } else {
+                textView.attributedText = NSAttributedString(
+                    string: text,
+                    attributes: MarkdownMessageRenderer.bodyAttributes
+                )
+            }
+        }
+
+        func fittedSize(
+            for textView: UITextView,
+            proposedWidth: CGFloat
+        ) -> CGSize {
+            if let cachedMeasurement,
+               abs(cachedMeasurement.width - proposedWidth) <= 0.5 {
+                return cachedMeasurement.size
+            }
+
+            let textBounds = textView.attributedText.boundingRect(
+                with: CGSize(
+                    width: proposedWidth,
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+            let fittedWidth = min(
+                proposedWidth,
+                max(ceil(textBounds.width), 1)
+            )
+            let fittedSize = textView.sizeThatFits(CGSize(
+                width: fittedWidth,
+                height: CGFloat.greatestFiniteMagnitude
+            ))
+            let result = CGSize(
+                width: fittedWidth,
+                height: ceil(fittedSize.height)
+            )
+            cachedMeasurement = (proposedWidth, result)
+            return result
+        }
+
         func textViewDidChangeSelection(_ textView: UITextView) {
             if textView.selectedRange.length > 0 {
                 ConversationTextSelectionManager.shared.activate(textView)
@@ -3271,9 +3872,11 @@ private struct ChatBubbleSurface<Content: View>: View {
                         .regular.tint(Color.accentColor.opacity(0.22)),
                         in: shape
                     )
+                    .overlay { bubbleOutline(for: shape) }
             } else {
                 paddedContent
                     .glassEffect(.regular, in: shape)
+                    .overlay { bubbleOutline(for: shape) }
             }
         } else {
             paddedContent
@@ -3297,6 +3900,17 @@ private struct ChatBubbleSurface<Content: View>: View {
             .padding(.leading, role == .user ? 14 : 20)
             .padding(.trailing, role == .user ? 20 : 14)
             .padding(.vertical, 11)
+    }
+
+    private func bubbleOutline(for shape: ChatBubbleShape) -> some View {
+        shape
+            .stroke(
+                Color(uiColor: .separator).opacity(
+                    role == .user ? 0.26 : 0.36
+                ),
+                lineWidth: 0.5
+            )
+            .allowsHitTesting(false)
     }
 }
 

@@ -4,6 +4,7 @@ import SwiftUI
 struct RealtimeConversationHistoryView: View {
     let database: PlantDatabase
     let onContinueConversation: (AIConversation, [ChatMessage]) -> Void
+    let onDetailPresentationChanged: (Bool) -> Void
 
     @State private var conversations: [AIConversation] = []
     @State private var isLoading = true
@@ -29,6 +30,8 @@ struct RealtimeConversationHistoryView: View {
                                 conversation: conversation,
                                 onContinueConversation: onContinueConversation
                             )
+                            .onAppear { onDetailPresentationChanged(true) }
+                            .onDisappear { onDetailPresentationChanged(false) }
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(conversation.title)
@@ -45,7 +48,6 @@ struct RealtimeConversationHistoryView: View {
                             }
                         }
                     }
-                    .onDelete(perform: deleteConversations)
                 }
                 .refreshable {
                     await loadConversations()
@@ -81,21 +83,6 @@ struct RealtimeConversationHistoryView: View {
             errorMessage = error.localizedDescription
         }
         isLoading = false
-    }
-
-    private func deleteConversations(at offsets: IndexSet) {
-        let ids = offsets.map { conversations[$0].id }
-        conversations.remove(atOffsets: offsets)
-        Task {
-            do {
-                for id in ids {
-                    try await database.deleteConversation(id: id)
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                await loadConversations()
-            }
-        }
     }
 
     private var deletionConfirmationPresented: Binding<Bool> {

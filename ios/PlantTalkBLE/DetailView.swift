@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DetailView: View {
     let database: PlantDatabase
+    let onDetailPresentationChanged: (Bool) -> Void
 
     @State private var todayReadings: [HistoryReading] = []
     @State private var dailySummaries: [DailySummary] = []
@@ -33,6 +34,8 @@ struct DetailView: View {
                         Section {
                             NavigationLink {
                                 DayDetailView(database: database, date: todaySummary.date)
+                                    .onAppear { onDetailPresentationChanged(true) }
+                                    .onDisappear { onDetailPresentationChanged(false) }
                             } label: {
                                 DailySummaryRow(summary: todaySummary)
                             }
@@ -50,6 +53,8 @@ struct DetailView: View {
                             ForEach(dailySummaries) { summary in
                                 NavigationLink {
                                     DayDetailView(database: database, date: summary.date)
+                                        .onAppear { onDetailPresentationChanged(true) }
+                                        .onDisappear { onDetailPresentationChanged(false) }
                                 } label: {
                                     DailySummaryRow(summary: summary)
                                 }

@@ -4,11 +4,15 @@ struct HistoryOverviewView: View {
     let database: PlantDatabase
     let onContinueTextConversation: (AIConversation, [ChatMessage]) -> Void
     let onContinueRealtimeConversation: (AIConversation, [ChatMessage]) -> Void
+    let onDetailPresentationChanged: (Bool) -> Void
     @State private var selectedTab: HistoryTab = .sensor
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            DetailView(database: database)
+            DetailView(
+                database: database,
+                onDetailPresentationChanged: onDetailPresentationChanged
+            )
                 .tag(HistoryTab.sensor)
                 .tabItem {
                     Label("传感器", systemImage: "sensor.tag.radiowaves.forward")
@@ -16,7 +20,8 @@ struct HistoryOverviewView: View {
 
             ConversationListView(
                 database: database,
-                onContinueConversation: onContinueTextConversation
+                onContinueConversation: onContinueTextConversation,
+                onDetailPresentationChanged: onDetailPresentationChanged
             )
                 .tag(HistoryTab.textConversation)
                 .tabItem {
@@ -25,7 +30,8 @@ struct HistoryOverviewView: View {
 
             RealtimeConversationHistoryView(
                 database: database,
-                onContinueConversation: onContinueRealtimeConversation
+                onContinueConversation: onContinueRealtimeConversation,
+                onDetailPresentationChanged: onDetailPresentationChanged
             )
                 .tag(HistoryTab.realtimeConversation)
                 .tabItem {

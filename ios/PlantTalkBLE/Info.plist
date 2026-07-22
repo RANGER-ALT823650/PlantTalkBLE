@@ -26,6 +26,8 @@
 	<string>此 App 使用相机拍摄植物照片并进行状态分析。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>此 App 使用麦克风与植物进行实时语音对话。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>此 App 使用相册中的植物照片进行状态分析和实时对话。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

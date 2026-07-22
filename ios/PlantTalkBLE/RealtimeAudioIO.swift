@@ -306,7 +306,9 @@ final class RealtimeAudioIO {
         ) { [weak self] buffer, _ in
             guard let self,
                   self.responsePlaybackState().isActive else { return }
-            onResponseLevelDBFS(AudioLevelAnalyzer.levelDBFS(buffer: buffer))
+            let levelDBFS = AudioLevelAnalyzer.levelDBFS(buffer: buffer)
+            self.updateResponsePlaybackLevel(levelDBFS)
+            onResponseLevelDBFS(levelDBFS)
         }
         hasResponseLevelTap = true
 
@@ -432,6 +434,13 @@ final class RealtimeAudioIO {
             if scheduledResponseBufferCount == 0 {
                 responseLevelDBFS = -160
             }
+        }
+    }
+
+    private func updateResponsePlaybackLevel(_ levelDBFS: Float) {
+        playbackStateLock.withLock {
+            guard scheduledResponseBufferCount > 0 else { return }
+            responseLevelDBFS = levelDBFS
         }
     }
 

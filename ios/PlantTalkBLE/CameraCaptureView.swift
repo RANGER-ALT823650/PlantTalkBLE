@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreImage
 import ImageIO
 import Photos
 import SwiftUI
@@ -50,6 +51,49 @@ struct ConversationImageAttachment: Identifiable, Equatable {
             mimeType: "image/jpeg",
             data: data
         )
+    }
+
+    /// Qwen Realtime accepts JPEG frames up to 1080p and 256 KB after Base64
+    /// encoding. Keeping the binary JPEG below 190 KB leaves room for Base64's
+    /// 4/3 expansion and the surrounding JSON event.
+    @MainActor
+    func encodedRealtimeImage() throws -> Data {
+        let dimensions: [CGFloat] = [1_280, 960, 720, 480]
+        let qualities: [CGFloat] = [0.72, 0.6, 0.48, 0.36]
+
+        for maximumPixelDimension in dimensions {
+            let originalSize = image.size
+            guard originalSize.width > 0, originalSize.height > 0 else {
+                throw ConversationImageAttachmentError.invalidImage
+            }
+            let scale = min(
+                1,
+                maximumPixelDimension / max(originalSize.width, originalSize.height)
+            )
+            let outputSize = CGSize(
+                width: max(1, (originalSize.width * scale).rounded()),
+                height: max(1, (originalSize.height * scale).rounded())
+            )
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let renderedImage = UIGraphicsImageRenderer(
+                size: outputSize,
+                format: format
+            ).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: outputSize))
+            }
+
+            for quality in qualities {
+                guard let data = renderedImage.jpegData(compressionQuality: quality) else {
+                    continue
+                }
+                if data.count <= RealtimeVisualFrameEncoder.maximumJPEGByteCount {
+                    return data
+                }
+            }
+        }
+        throw ConversationImageAttachmentError.encodingFailed
     }
 }
 
@@ -766,6 +810,9 @@ private final class ConversationCameraController: NSObject, ObservableObject,
     }
 
     private func configureSession() throws {
+        // This camera is video-only. Keep AVFoundation from replacing the
+        // realtime conversation's .playAndRecord/.voiceChat audio session.
+        session.automaticallyConfiguresApplicationAudioSession = false
         session.beginConfiguration()
         defer { session.commitConfiguration() }
         session.sessionPreset = .photo
@@ -955,6 +1002,381 @@ private struct CameraPreview: UIViewRepresentable {
 
     func updateUIView(_ uiView: CameraPreviewView, context: Context) {
         uiView.previewLayer.session = session
+    }
+}
+
+// MARK: - Realtime camera frames
+
+enum RealtimeCameraStreamState: Equatable {
+    case idle
+    case preparing
+    case streaming
+    case unavailable(String)
+}
+
+/// A lightweight video-only capture pipeline for Qwen Realtime. The local
+/// preview remains fluid while the delegate emits at most one compressed JPEG
+/// per second, matching the provider's recommended visual input rate.
+final class RealtimeCameraStreamController: NSObject, ObservableObject,
+    AVCaptureVideoDataOutputSampleBufferDelegate {
+    let session = AVCaptureSession()
+
+    @Published private(set) var state: RealtimeCameraStreamState = .idle
+    @Published private(set) var cameraPosition: AVCaptureDevice.Position = .back
+
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let captureQueue = DispatchQueue(
+        label: "com.example.PlantTalkBLE.realtime-camera",
+        qos: .userInitiated
+    )
+    private let frameEncoder = RealtimeVisualFrameEncoder()
+    private var cameraInput: AVCaptureDeviceInput?
+    // Read and written only on captureQueue. The published position is UI-only.
+    private var activeCameraPosition: AVCaptureDevice.Position = .back
+    private var frameHandler: ((Data) -> Void)?
+    private var lastFrameTimestamp: TimeInterval?
+    private var isConfigured = false
+
+    func start(onFrame: @escaping (Data) -> Void) {
+        frameHandler = onFrame
+        guard state == .idle || state.isUnavailable else { return }
+        state = .preparing
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureAndStart()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if granted {
+                        self.configureAndStart()
+                    } else {
+                        self.state = .unavailable(
+                            "请在系统设置中允许 Plant Talk 使用相机。"
+                        )
+                    }
+                }
+            }
+        default:
+            state = .unavailable("请在系统设置中允许 Plant Talk 使用相机。")
+        }
+    }
+
+    func stop() {
+        frameHandler = nil
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+            self.lastFrameTimestamp = nil
+            DispatchQueue.main.async {
+                self.state = .idle
+            }
+        }
+    }
+
+    func switchCamera() {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            let nextPosition: AVCaptureDevice.Position = self.activeCameraPosition == .back
+                ? .front
+                : .back
+            do {
+                try self.replaceCameraInput(position: nextPosition)
+                self.activeCameraPosition = nextPosition
+                self.lastFrameTimestamp = nil
+                DispatchQueue.main.async {
+                    self.cameraPosition = nextPosition
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.state = .unavailable(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        if let lastFrameTimestamp, timestamp - lastFrameTimestamp < 1 {
+            return
+        }
+        lastFrameTimestamp = timestamp
+
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let data = frameEncoder.encode(
+                  pixelBuffer: pixelBuffer,
+                  cameraPosition: activeCameraPosition
+              ) else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.frameHandler?(data)
+        }
+    }
+
+    private func configureAndStart() {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                if !self.isConfigured {
+                    try self.configureSession()
+                    self.isConfigured = true
+                } else {
+                    self.videoOutput.setSampleBufferDelegate(self, queue: self.captureQueue)
+                }
+                if !self.session.isRunning {
+                    self.session.startRunning()
+                }
+                DispatchQueue.main.async {
+                    self.state = .streaming
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.state = .unavailable(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func configureSession() throws {
+        // The app already owns the shared audio session for realtime voice.
+        // A video-only capture session must not silently reconfigure it.
+        session.automaticallyConfiguresApplicationAudioSession = false
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        if session.canSetSessionPreset(.hd1280x720) {
+            session.sessionPreset = .hd1280x720
+        }
+
+        let input = try makeCameraInput(position: .back)
+        guard session.canAddInput(input) else {
+            throw RealtimeCameraStreamError.cameraUnavailable
+        }
+        session.addInput(input)
+        cameraInput = input
+
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String:
+                kCVPixelFormatType_32BGRA
+        ]
+        guard session.canAddOutput(videoOutput) else {
+            throw RealtimeCameraStreamError.cameraUnavailable
+        }
+        session.addOutput(videoOutput)
+        videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
+    }
+
+    private func replaceCameraInput(position: AVCaptureDevice.Position) throws {
+        let newInput = try makeCameraInput(position: position)
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        if let cameraInput {
+            session.removeInput(cameraInput)
+        }
+        guard session.canAddInput(newInput) else {
+            if let cameraInput, session.canAddInput(cameraInput) {
+                session.addInput(cameraInput)
+            }
+            throw RealtimeCameraStreamError.cameraUnavailable
+        }
+        session.addInput(newInput)
+        cameraInput = newInput
+    }
+
+    private func makeCameraInput(
+        position: AVCaptureDevice.Position
+    ) throws -> AVCaptureDeviceInput {
+        guard let device = AVCaptureDevice.default(
+            .builtInWideAngleCamera,
+            for: .video,
+            position: position
+        ) else {
+            throw RealtimeCameraStreamError.cameraUnavailable
+        }
+        return try AVCaptureDeviceInput(device: device)
+    }
+}
+
+private extension RealtimeCameraStreamState {
+    var isUnavailable: Bool {
+        if case .unavailable = self { return true }
+        return false
+    }
+}
+
+private enum RealtimeCameraStreamError: LocalizedError {
+    case cameraUnavailable
+
+    var errorDescription: String? {
+        "无法启动摄像头，请检查相机权限或稍后重试。"
+    }
+}
+
+final class RealtimeVisualFrameEncoder {
+    static let maximumJPEGByteCount = 190_000
+
+    private let context = CIContext(options: [.cacheIntermediates: false])
+
+    func encode(
+        pixelBuffer: CVPixelBuffer,
+        cameraPosition: AVCaptureDevice.Position
+    ) -> Data? {
+        let orientation: CGImagePropertyOrientation = cameraPosition == .front
+            ? .leftMirrored
+            : .right
+        let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        let maximumDimensions: [CGFloat] = [1_280, 960, 720, 480]
+        let qualities: [CGFloat] = [0.68, 0.56, 0.44, 0.34]
+
+        for maximumDimension in maximumDimensions {
+            let scale = min(
+                1,
+                maximumDimension / max(image.extent.width, image.extent.height)
+            )
+            let resized = image.transformed(
+                by: CGAffineTransform(scaleX: scale, y: scale)
+            )
+            guard let cgImage = context.createCGImage(
+                resized,
+                from: resized.extent.integral
+            ) else { continue }
+
+            for quality in qualities {
+                guard let data = Self.jpegData(
+                    from: cgImage,
+                    quality: quality
+                ) else { continue }
+                if data.count <= Self.maximumJPEGByteCount {
+                    return data
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func jpegData(
+        from image: CGImage,
+        quality: CGFloat
+    ) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            "public.jpeg" as CFString,
+            1,
+            nil
+        ) else { return nil }
+        CGImageDestinationAddImage(
+            destination,
+            image,
+            [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+        )
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+}
+
+private struct RealtimeCameraPreview: UIViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeUIView(context: Context) -> PreviewView {
+        let view = PreviewView()
+        view.previewLayer.session = session
+        view.previewLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        uiView.previewLayer.session = session
+    }
+
+    final class PreviewView: UIView {
+        override class var layerClass: AnyClass {
+            AVCaptureVideoPreviewLayer.self
+        }
+
+        var previewLayer: AVCaptureVideoPreviewLayer {
+            layer as! AVCaptureVideoPreviewLayer
+        }
+    }
+}
+
+@MainActor
+struct RealtimeCameraStreamView: View {
+    let onFrame: (Data) -> Void
+    let onClose: () -> Void
+
+    @StateObject private var camera = RealtimeCameraStreamController()
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            RealtimeCameraPreview(session: camera.session)
+                .background(Color.black)
+
+            if camera.state == .preparing || camera.state == .idle {
+                ProgressView("正在启动摄像头…")
+                    .tint(.white)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if case .unavailable(let message) = camera.state {
+                ContentUnavailableView {
+                    Label("相机不可用", systemImage: "camera.fill")
+                } description: {
+                    Text(message)
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            HStack(spacing: 10) {
+                Button(action: camera.switchCamera) {
+                    Image(systemName: "camera.rotate")
+                        .frame(width: 34, height: 34)
+                }
+                .accessibilityLabel("切换前后摄像头")
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .frame(width: 34, height: 34)
+                }
+                .accessibilityLabel("停止共享摄像头")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .tint(.white)
+            .padding(10)
+
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 8, height: 8)
+                Text("视觉共享 · 每秒 1 帧")
+                    .font(.caption.weight(.medium))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.52), in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .padding(10)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .onAppear {
+            camera.start(onFrame: onFrame)
+        }
+        .onDisappear {
+            camera.stop()
+        }
     }
 }
 

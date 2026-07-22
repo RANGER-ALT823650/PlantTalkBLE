@@ -8,7 +8,24 @@ struct RealtimeTranscriptEntry: Identifiable, Equatable, Sendable {
     let role: ChatRole
     let text: String
     let createdAt: Date
+    let imageAttachments: [ChatImageAttachment]
     let toolInvocations: [ToolInvocation]
+
+    init(
+        id: UUID,
+        role: ChatRole,
+        text: String,
+        createdAt: Date,
+        imageAttachments: [ChatImageAttachment] = [],
+        toolInvocations: [ToolInvocation]
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.createdAt = createdAt
+        self.imageAttachments = imageAttachments
+        self.toolInvocations = toolInvocations
+    }
 }
 
 enum RealtimeConversationState: Equatable {
@@ -84,6 +101,10 @@ struct QwenRealtimeServerEvent: Decodable, Equatable, Sendable {
 /// tests without connecting to a model.
 enum QwenRealtimeToolProtocol {
     static let functionCallArgumentsDone = "response.function_call_arguments.done"
+    /// Qwen requires an audio append before an image append. Priming each frame
+    /// with 20 ms of silent PCM16 also re-establishes that ordering after
+    /// server-side VAD commits the previous input buffer.
+    static let visualPrimingPCMByteCount = Int(16_000 * 2 * 0.02)
 
     static func toolCall(from event: QwenRealtimeServerEvent) throws -> AIModelToolCall {
         guard event.type == functionCallArgumentsDone,
@@ -164,6 +185,45 @@ enum QwenRealtimeToolProtocol {
         ]
     }
 
+    static func imageAppendEvent(
+        eventID: String,
+        imageData: Data
+    ) -> [String: Any] {
+        [
+            "event_id": eventID,
+            "type": "input_image_buffer.append",
+            "image": imageData.base64EncodedString()
+        ]
+    }
+
+    static func audioAppendEvent(
+        eventID: String,
+        audioData: Data
+    ) -> [String: Any] {
+        [
+            "event_id": eventID,
+            "type": "input_audio_buffer.append",
+            "audio": audioData.base64EncodedString()
+        ]
+    }
+
+    static func visualInputEvents(
+        eventIDPrefix: String,
+        imageData: Data
+    ) -> [[String: Any]] {
+        let silentPCM = Data(repeating: 0, count: visualPrimingPCMByteCount)
+        return [
+            audioAppendEvent(
+                eventID: "\(eventIDPrefix)_audio",
+                audioData: silentPCM
+            ),
+            imageAppendEvent(
+                eventID: "\(eventIDPrefix)_image",
+                imageData: imageData
+            )
+        ]
+    }
+
     static func historyMessageEvent(
         eventID: String,
         message: ChatMessage
@@ -195,12 +255,20 @@ enum QwenRealtimeToolProtocol {
     }
 }
 
+enum RealtimeBargeInPolicy {
+    static let requiredDuration: TimeInterval = 0.28
+
+    /// Residual speaker audio is commonly quieter than the assistant output,
+    /// so interruption requires the microphone to exceed the audible response
+    /// by 3 dB. Clamp the threshold so quiet and loud playback both remain usable.
+    static func requiredInputLevel(responseLevelDBFS: Float) -> Float {
+        min(-10, max(-24, responseLevelDBFS + 3))
+    }
+}
+
 @MainActor
 @Observable
 final class QwenRealtimeConversation {
-    private static let minimumBargeInLevelDBFS: Float = -26
-    private static let responseEchoMarginDB: Float = 10
-    private static let requiredBargeInDuration: TimeInterval = 0.16
     private static let maximumBargeInPreRollBytes = Int(16_000 * 2 * 0.35)
     private static let maximumPreConnectionAudioBytes = Int(16_000 * 2 * 15)
 
@@ -224,7 +292,7 @@ final class QwenRealtimeConversation {
     @ObservationIgnored private let audioIO = RealtimeAudioIO()
     @ObservationIgnored private var webSocket: URLSessionWebSocketTask?
     @ObservationIgnored private var receiveTask: Task<Void, Never>?
-    @ObservationIgnored private var audioSendTask: Task<Void, Never>?
+    @ObservationIgnored private var mediaSendTask: Task<Void, Never>?
     @ObservationIgnored private var persistenceTask: Task<Void, Never>?
     @ObservationIgnored private var connectionTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var bargeInConfirmationTask: Task<Void, Never>?
@@ -242,6 +310,8 @@ final class QwenRealtimeConversation {
     @ObservationIgnored private var preConnectionAudio: [Data] = []
     @ObservationIgnored private var preConnectionAudioByteCount = 0
     @ObservationIgnored private var microphoneChunkCount = 0
+    @ObservationIgnored private var pinnedStillImageData: Data?
+    @ObservationIgnored private var hasReplayedPinnedImageForCurrentSpeech = false
     @ObservationIgnored private var hasRetriedSilentAudioStart = false
     @ObservationIgnored private var pendingToolCalls: [AIModelToolCall] = []
     @ObservationIgnored private var pendingAssistantToolInvocations: [ToolInvocation] = []
@@ -265,7 +335,10 @@ final class QwenRealtimeConversation {
         guard !state.isActive else { return }
         let historyMessages = messages.filter {
             $0.role != .system
-                && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (
+                    !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || !$0.imageAttachments.isEmpty
+                )
         }
         let attemptID = UUID()
         startAttemptID = attemptID
@@ -275,6 +348,7 @@ final class QwenRealtimeConversation {
                 role: message.role,
                 text: message.content,
                 createdAt: message.createdAt,
+                imageAttachments: message.imageAttachments,
                 toolInvocations: message.toolInvocations
             )
         }
@@ -295,6 +369,8 @@ final class QwenRealtimeConversation {
         isDiscardingCancelledResponse = false
         resetPreConnectionAudio()
         microphoneChunkCount = 0
+        pinnedStillImageData = nil
+        hasReplayedPinnedImageForCurrentSpeech = false
         hasRetriedSilentAudioStart = false
         pendingToolCalls.removeAll(keepingCapacity: true)
         pendingAssistantToolInvocations.removeAll(keepingCapacity: true)
@@ -388,6 +464,55 @@ final class QwenRealtimeConversation {
         state = .idle
     }
 
+    /// Adds a still image or an extracted camera frame to the current realtime
+    /// turn. Qwen commits the visual buffer together with the audio buffer when
+    /// server-side VAD detects the end of the user's next utterance.
+    func sendVisualFrame(_ imageData: Data) async throws {
+        guard state == .connected else {
+            throw URLError(.notConnectedToInternet)
+        }
+        let operation = enqueueMediaEvents(
+            QwenRealtimeToolProtocol.visualInputEvents(
+                eventIDPrefix: "event_\(UUID().uuidString)",
+                imageData: imageData
+            )
+        )
+        try await operation.value.get()
+    }
+
+    /// Adds a user-visible image-only message after a one-shot photo has been
+    /// written to the realtime socket. Continuous camera samples intentionally
+    /// do not call this method, so the transcript is not flooded with frames.
+    func recordSentImage(_ imageData: Data) {
+        guard !imageData.isEmpty else { return }
+        pinnedStillImageData = imageData
+        // If VAD has already marked this utterance as active, the original
+        // sendVisualFrame call placed the image inside the current turn.
+        hasReplayedPinnedImageForCurrentSpeech = isUserSpeaking
+        let messageID = UUID()
+        let entry = RealtimeTranscriptEntry(
+            id: messageID,
+            role: .user,
+            text: "",
+            createdAt: Date(),
+            imageAttachments: [
+                ChatImageAttachment(
+                    id: "realtime-\(messageID.uuidString)-image",
+                    mimeType: "image/jpeg",
+                    data: imageData
+                )
+            ],
+            toolInvocations: []
+        )
+        entries.append(entry)
+        enqueuePersistence(entry)
+    }
+
+    func clearPinnedStillImage() {
+        pinnedStillImageData = nil
+        hasReplayedPinnedImageForCurrentSpeech = false
+    }
+
     nonisolated static func endpointURL(baseURL: URL, model: String) -> URL {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return baseURL
@@ -447,10 +572,12 @@ final class QwenRealtimeConversation {
         case "input_audio_buffer.speech_started":
             prepareCurrentUserTranscript()
             isUserSpeaking = true
+            replayPinnedStillImageForCurrentSpeech()
             scheduleBargeInConfirmation()
 
         case "input_audio_buffer.speech_stopped":
             isUserSpeaking = false
+            hasReplayedPinnedImageForCurrentSpeech = false
             bargeInConfirmationTask?.cancel()
             bargeInConfirmationTask = nil
 
@@ -586,9 +713,8 @@ final class QwenRealtimeConversation {
         // This keeps residual speaker echo away from the server-side VAD/ASR.
         appendBargeInPreRoll(chunk.data)
 
-        let adaptiveThreshold = max(
-            Self.minimumBargeInLevelDBFS,
-            chunk.responseLevelDBFS - Self.responseEchoMarginDB
+        let adaptiveThreshold = RealtimeBargeInPolicy.requiredInputLevel(
+            responseLevelDBFS: chunk.responseLevelDBFS
         )
         let chunkDuration = Double(chunk.data.count) / (16_000 * 2)
         if chunk.levelDBFS >= adaptiveThreshold {
@@ -597,7 +723,7 @@ final class QwenRealtimeConversation {
             candidateBargeInDuration = 0
         }
 
-        guard candidateBargeInDuration >= Self.requiredBargeInDuration else { return }
+        guard candidateBargeInDuration >= RealtimeBargeInPolicy.requiredDuration else { return }
 
         isUserSpeaking = true
         isReleasingBargeInAudio = true
@@ -712,25 +838,72 @@ final class QwenRealtimeConversation {
     }
 
     private func enqueueAudio(_ data: Data) {
-        let previous = audioSendTask
+        let operation = enqueueMediaEvents([
+            QwenRealtimeToolProtocol.audioAppendEvent(
+                eventID: "event_\(UUID().uuidString)",
+                audioData: data
+            )
+        ])
         let attemptID = startAttemptID
-        audioSendTask = Task { [weak self] in
+        Task { [weak self] in
+            if case .failure(let error) = await operation.value {
+                self?.fail(error, attemptID: attemptID)
+            }
+        }
+    }
+
+    /// A still image selected before speaking is replayed only after Qwen has
+    /// detected real speech. This places the image inside the same audio
+    /// timeline and VAD commit as the user's question. The latest still remains
+    /// pinned for later follow-up questions until another visual source replaces it.
+    private func replayPinnedStillImageForCurrentSpeech() {
+        guard let imageData = pinnedStillImageData,
+              !hasReplayedPinnedImageForCurrentSpeech else { return }
+        hasReplayedPinnedImageForCurrentSpeech = true
+
+        let operation = enqueueMediaEvents([
+            QwenRealtimeToolProtocol.imageAppendEvent(
+                eventID: "event_\(UUID().uuidString)_speech_image",
+                imageData: imageData
+            )
+        ])
+        let attemptID = startAttemptID
+        Task { [weak self] in
+            if case .failure(let error) = await operation.value {
+                self?.fail(error, attemptID: attemptID)
+            }
+        }
+    }
+
+    /// Audio chunks and camera frames share one ordered task chain so frames
+    /// cannot overtake the microphone data that Qwen requires first.
+    private func enqueueMediaEvents(
+        _ events: [[String: Any]]
+    ) -> Task<Result<Void, Error>, Never> {
+        let previous = mediaSendTask
+        let attemptID = startAttemptID
+        let operation = Task { [weak self] () -> Result<Void, Error> in
             await previous?.value
             guard !Task.isCancelled,
                   let self,
                   let attemptID,
                   self.isCurrentStartAttempt(attemptID),
-                  self.state == .connected else { return }
+                  self.state == .connected else {
+                return .failure(URLError(.cancelled))
+            }
             do {
-                try await self.sendJSON([
-                    "event_id": "event_\(UUID().uuidString)",
-                    "type": "input_audio_buffer.append",
-                    "audio": data.base64EncodedString()
-                ])
+                for event in events {
+                    try await self.sendJSON(event)
+                }
+                return .success(())
             } catch {
-                self.fail(error, attemptID: attemptID)
+                return .failure(error)
             }
         }
+        mediaSendTask = Task {
+            _ = await operation.value
+        }
+        return operation
     }
 
     nonisolated static func sessionInstructions(
@@ -742,6 +915,9 @@ final class QwenRealtimeConversation {
     ) -> String {
         [
             systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            """
+            当前实时会话支持用户上传图片和共享摄像头画面。当前回合存在视觉输入时，直接观察实际画面并回答相关问题；不要因为“植物传感器”的角色设定而声称自己看不到图片，也不要把图片或画面问题错误地改成传感器工具查询。当前回合没有视觉输入时不要虚构画面。视觉观察与 BLE 传感器数据是两类独立信息，只有问题确实依赖温度、湿度、土壤 ADC、光照或历史记录时才调用工具。
+            """,
             plantBinding.modelInstructions,
             memoryContext,
             PlantDataToolCatalog.usageInstructions,
@@ -878,7 +1054,15 @@ final class QwenRealtimeConversation {
                 if let conversation = self.conversationsBySessionID[persistenceSessionID] {
                     activeConversation = conversation
                 } else {
-                    let titleSource = entry.role == .user ? entry.text : "实时语音对话"
+                    let titleSource: String
+                    if entry.role == .user,
+                       !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        titleSource = entry.text
+                    } else if !entry.imageAttachments.isEmpty {
+                        titleSource = "实时视觉对话"
+                    } else {
+                        titleSource = "实时语音对话"
+                    }
                     let created = try await self.database.createConversation(
                         title: String(titleSource.replacingOccurrences(of: "\n", with: " ").prefix(28)),
                         kind: .realtime
@@ -892,6 +1076,7 @@ final class QwenRealtimeConversation {
                     role: entry.role,
                     content: entry.text,
                     createdAt: entry.createdAt,
+                    imageAttachments: entry.imageAttachments,
                     toolInvocations: entry.toolInvocations
                 ))
             } catch {
@@ -981,8 +1166,8 @@ final class QwenRealtimeConversation {
         bargeInConfirmationTask = nil
         audioStartupWatchdogTask?.cancel()
         audioStartupWatchdogTask = nil
-        audioSendTask?.cancel()
-        audioSendTask = nil
+        mediaSendTask?.cancel()
+        mediaSendTask = nil
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = nil
         receiveTask?.cancel()
@@ -994,6 +1179,8 @@ final class QwenRealtimeConversation {
         audioStarted = false
         resetPreConnectionAudio()
         microphoneChunkCount = 0
+        pinnedStillImageData = nil
+        hasReplayedPinnedImageForCurrentSpeech = false
         hasRetriedSilentAudioStart = false
         resetLocalBargeInDetection()
         isUserSpeaking = false

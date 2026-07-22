@@ -6,6 +6,12 @@ struct RealtimeConversationSheet: View {
     private let previewState: RealtimeConversationSheetState
 
     @State private var selectedDetent: PresentationDetent
+    @State private var mediaSource: ConversationMediaSource?
+    @State private var isSharingCamera = false
+    @State private var isSendingCameraFrame = false
+    @State private var visualStatusText = ""
+    @State private var visualAlert: RealtimeVisualAlert?
+    @State private var visualSendTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -37,12 +43,22 @@ struct RealtimeConversationSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            statusHeader
+            if isSharingCamera {
+                realtimeCamera
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
 
             transcript
                 .plantTalkBottomBar {
-                    endConversationControl
+                    conversationControls
                 }
+        }
+        .overlay(alignment: .top) {
+            statusHeader
+                .allowsHitTesting(false)
+                .zIndex(1)
         }
         .background {
             ChatConversationBackdrop()
@@ -52,6 +68,22 @@ struct RealtimeConversationSheet: View {
         .presentationDragIndicator(.visible)
         .presentationContentInteraction(.resizes)
         .presentationCornerRadius(32)
+        .fullScreenCover(item: $mediaSource) { source in
+            ConversationMediaPanel(
+                source: source,
+                onDismiss: { mediaSource = nil },
+                onAttachments: handleAttachments
+            )
+            .ignoresSafeArea()
+        }
+        .alert(item: $visualAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
+        .animation(.snappy(duration: 0.28), value: isSharingCamera)
     }
 
     private var statusHeader: some View {
@@ -137,13 +169,14 @@ struct RealtimeConversationSheet: View {
                     }
                 }
                 .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.top, isSharingCamera ? 8 : 82)
+                .padding(.bottom, 8)
             }
             .scrollIndicators(.hidden)
             .overlay(alignment: .top) {
                 if state.isWaitingForAssistantText {
                     ModelThinkingIndicator()
-                        .padding(.vertical, 8)
+                        .padding(.top, isSharingCamera ? 8 : 74)
                         .transition(thinkingTransition)
                 }
             }
@@ -186,14 +219,77 @@ struct RealtimeConversationSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var endConversationControl: some View {
-        endConversationButton
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal)
-            .padding(.top, 8)
-            .padding(.bottom, 10)
+    private var conversationControls: some View {
+        VStack(spacing: 8) {
+            if !visualStatusText.isEmpty {
+                Label(visualStatusText, systemImage: "viewfinder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .transition(.opacity)
+            }
+
+            HStack(spacing: 10) {
+                visualAttachmentMenu
+                cameraSharingButton
+                endConversationButton
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
     }
 
+    private var realtimeCamera: some View {
+        RealtimeCameraStreamView(
+            onFrame: sendCameraFrame,
+            onClose: stopCameraSharing
+        )
+        .frame(height: selectedDetent == .large ? 190 : 128)
+        .accessibilityHint("相机画面按每秒一帧发送给实时模型")
+    }
+
+    private var visualAttachmentMenu: some View {
+        Menu {
+            Button {
+                openMediaSource(.camera)
+            } label: {
+                Label("拍一张照片", systemImage: "camera")
+            }
+
+            Button {
+                openMediaSource(.photoLibrary)
+            } label: {
+                Label("从相册选择", systemImage: "photo.on.rectangle")
+            }
+        } label: {
+            Image(systemName: "photo.badge.plus")
+                .font(.headline)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .disabled(state.conversationState != .connected)
+        .accessibilityLabel("添加图片")
+        .accessibilityHint("拍照或从相册选择图片，在下一段语音中一起发送")
+    }
+
+    private var cameraSharingButton: some View {
+        Button(action: toggleCameraSharing) {
+            Image(systemName: isSharingCamera ? "video.slash.fill" : "video.fill")
+                .font(.headline)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .tint(isSharingCamera ? .red : .accentColor)
+        .disabled(state.conversationState != .connected)
+        .accessibilityLabel(isSharingCamera ? "停止共享摄像头" : "共享摄像头")
+        .accessibilityHint("持续预览并按每秒一帧发送给实时模型")
+    }
     @ViewBuilder
     private var endConversationButton: some View {
         if #available(iOS 26, *) {
@@ -335,9 +431,115 @@ struct RealtimeConversationSheet: View {
     }
 
     private func endConversation() {
+        visualSendTask?.cancel()
+        visualSendTask = nil
+        isSharingCamera = false
         conversation?.stop()
         dismiss()
     }
+
+    private func openMediaSource(_ source: ConversationMediaSource) {
+        isSharingCamera = false
+        visualStatusText = ""
+        mediaSource = source
+    }
+
+    private func handleAttachments(_ attachments: [ConversationImageAttachment]) {
+        mediaSource = nil
+        guard let conversation, !attachments.isEmpty else { return }
+
+        visualSendTask?.cancel()
+        visualStatusText = "正在处理并发送图片…"
+        visualSendTask = Task { @MainActor in
+            do {
+                for (index, attachment) in attachments.enumerated() {
+                    try Task.checkCancellation()
+                    let data = try attachment.encodedRealtimeImage()
+                    try await conversation.sendVisualFrame(data)
+                    conversation.recordSentImage(data)
+                    if index < attachments.count - 1 {
+                        // The provider recommends no more than one visual frame
+                        // per second for both still-image batches and video.
+                        try await Task.sleep(for: .seconds(1))
+                    }
+                }
+                visualStatusText = attachments.count == 1
+                    ? "图片已就绪，请直接针对画面提问"
+                    : "\(attachments.count) 张图片已就绪，请直接针对画面提问"
+            } catch is CancellationError {
+                return
+            } catch {
+                visualStatusText = ""
+                visualAlert = RealtimeVisualAlert(
+                    title: "无法发送图片",
+                    message: visualErrorMessage(error, conversation: conversation)
+                )
+            }
+        }
+    }
+
+    private func toggleCameraSharing() {
+        if isSharingCamera {
+            stopCameraSharing()
+        } else {
+            visualSendTask?.cancel()
+            visualSendTask = nil
+            conversation?.clearPinnedStillImage()
+            visualStatusText = "摄像头已共享，画面会和你的语音一起理解"
+            isSharingCamera = true
+        }
+    }
+
+    private func stopCameraSharing() {
+        isSharingCamera = false
+        isSendingCameraFrame = false
+        visualStatusText = "摄像头共享已停止，仍可继续语音对话"
+    }
+
+    private func sendCameraFrame(_ data: Data) {
+        guard let conversation, !isSendingCameraFrame else { return }
+        guard conversation.state == .connected else {
+            stopCameraSharing()
+            if case .error(let message) = conversation.state {
+                visualAlert = RealtimeVisualAlert(
+                    title: "摄像头共享已停止",
+                    message: message
+                )
+            }
+            return
+        }
+        isSendingCameraFrame = true
+        Task { @MainActor in
+            defer { isSendingCameraFrame = false }
+            do {
+                try await conversation.sendVisualFrame(data)
+            } catch is CancellationError {
+                return
+            } catch {
+                stopCameraSharing()
+                visualAlert = RealtimeVisualAlert(
+                    title: "摄像头共享已停止",
+                    message: visualErrorMessage(error, conversation: conversation)
+                )
+            }
+        }
+    }
+
+    private func visualErrorMessage(
+        _ error: Error,
+        conversation: QwenRealtimeConversation
+    ) -> String {
+        if case .error(let message) = conversation.state {
+            return message
+        }
+        return error.localizedDescription
+    }
+}
+
+private struct RealtimeVisualAlert: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 @MainActor
@@ -429,7 +631,7 @@ private struct RealtimeVoiceStatusSymbol: View {
     }
 }
 
-private extension RealtimeTranscriptEntry {
+extension RealtimeTranscriptEntry {
     static let presentationConversationID = UUID()
 
     var chatMessage: ChatMessage {
@@ -439,6 +641,7 @@ private extension RealtimeTranscriptEntry {
             role: role,
             content: text,
             createdAt: createdAt,
+            imageAttachments: imageAttachments,
             toolInvocations: toolInvocations
         )
     }
