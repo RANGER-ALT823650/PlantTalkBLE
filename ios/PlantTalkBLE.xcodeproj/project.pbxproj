@@ -30,6 +30,7 @@
 		9358ABC597AD97A477630834 /* summary.md in Resources */ = {isa = PBXBuildFile; fileRef = F82B11E7789415F8CDA49B9A /* summary.md */; };
 		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
 		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
+		98D0641588A37B4F25B02EAF /* OrbTuningLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */; };
 		A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */; };
 		A98AE3F049FF7DF91F9186D3 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */; };
 		AA45D0AF5CBD31EE42D36021 /* AISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48D7300B5B0307794AED6BE /* AISettingsView.swift */; };
@@ -58,12 +59,14 @@
 
 /* Begin PBXFileReference section */
 		05099F394FC182A10A30211A /* PlantDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabase.swift; sourceTree = "<group>"; };
+		057D364A8D71562A5CC4CD19 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
 		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
 		0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabaseTests.swift; sourceTree = "<group>"; };
 		14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocol.swift; sourceTree = "<group>"; };
 		1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantMemory.swift; sourceTree = "<group>"; };
 		1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeProtocolTests.swift; sourceTree = "<group>"; };
+		216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTuningLabApp.swift; sourceTree = "<group>"; };
 		230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClientTests.swift; sourceTree = "<group>"; };
 		3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationHistoryView.swift; sourceTree = "<group>"; };
 		477FF261A878ED83CBA00B4F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -71,7 +74,7 @@
 		5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkCropTests.swift; sourceTree = "<group>"; };
 		600BD03E36121532166372D4 /* CameraCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureView.swift; sourceTree = "<group>"; };
 		63A12282A1F665039788BEE3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PlantTalkBLE.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PlantTalkBLE.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantBluetoothManager.swift; sourceTree = "<group>"; };
 		7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeAudioIO.swift; sourceTree = "<group>"; };
 		7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIConfiguration.swift; sourceTree = "<group>"; };
@@ -93,6 +96,7 @@
 		D6237A24CE1893E70859F6D7 /* PlantReading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantReading.swift; sourceTree = "<group>"; };
 		DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocolTests.swift; sourceTree = "<group>"; };
 		F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DayDetailView.swift; sourceTree = "<group>"; };
+		F467D1F5ADE95E1A6E0BBCE7 /* OrbTuningLab.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OrbTuningLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F48D7300B5B0307794AED6BE /* AISettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsView.swift; sourceTree = "<group>"; };
 		F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimationDemoView.swift; sourceTree = "<group>"; };
 		F82B11E7789415F8CDA49B9A /* summary.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = summary.md; sourceTree = "<group>"; };
@@ -147,9 +151,19 @@
 			path = PlantTalkBLE;
 			sourceTree = "<group>";
 		};
+		6B7C4E4734D7A56ED39D1370 /* OrbTuningLab */ = {
+			isa = PBXGroup;
+			children = (
+				057D364A8D71562A5CC4CD19 /* Info.plist */,
+				216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */,
+			);
+			path = OrbTuningLab;
+			sourceTree = "<group>";
+		};
 		B4BFB5D068D8933155DFA36B = {
 			isa = PBXGroup;
 			children = (
+				6B7C4E4734D7A56ED39D1370 /* OrbTuningLab */,
 				30C2000207D7393B0B4C4455 /* PlantTalkBLE */,
 				BD43BFC9697BDEA6A1ACC852 /* PlantTalkBLETests */,
 				E8F0FE74304B88910BEFB73B /* Products */,
@@ -181,6 +195,7 @@
 		E8F0FE74304B88910BEFB73B /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				F467D1F5ADE95E1A6E0BBCE7 /* OrbTuningLab.app */,
 				6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */,
 				BD65044E8B2807768E4A838D /* PlantTalkBLETests.xctest */,
 			);
@@ -190,6 +205,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		1A9AA6D16DB4D5ED9ABBA4BD /* OrbTuningLab */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E5B6C47E2161A6D5DD1470BE /* Build configuration list for PBXNativeTarget "OrbTuningLab" */;
+			buildPhases = (
+				E425A6F05D4B0187B43B61ED /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OrbTuningLab;
+			packageProductDependencies = (
+			);
+			productName = OrbTuningLab;
+			productReference = F467D1F5ADE95E1A6E0BBCE7 /* OrbTuningLab.app */;
+			productType = "com.apple.product-type.application";
+		};
 		742B46E52623C1067DF1332E /* PlantTalkBLE */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 602BB97DC9391FF1B6949314 /* Build configuration list for PBXNativeTarget "PlantTalkBLE" */;
@@ -237,7 +269,12 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					1A9AA6D16DB4D5ED9ABBA4BD = {
+						DevelopmentTeam = ZT3X6444JT;
+						ProvisioningStyle = Automatic;
+					};
 					742B46E52623C1067DF1332E = {
+						DevelopmentTeam = ZT3X6444JT;
 						ProvisioningStyle = Automatic;
 					};
 					E975ED3DDCA379F8E4588018 = {
@@ -262,6 +299,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				1A9AA6D16DB4D5ED9ABBA4BD /* OrbTuningLab */,
 				742B46E52623C1067DF1332E /* PlantTalkBLE */,
 				E975ED3DDCA379F8E4588018 /* PlantTalkBLETests */,
 			);
@@ -326,6 +364,14 @@
 				4394C6727D115B590FF2A08E /* PlantConversationBindingTests.swift in Sources */,
 				C756635B10D1D60457FCCBEA /* PlantDatabaseTests.swift in Sources */,
 				4F93921AB701B38ADC890BA3 /* QwenRealtimeProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E425A6F05D4B0187B43B61ED /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				98D0641588A37B4F25B02EAF /* OrbTuningLabApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -514,6 +560,24 @@
 			};
 			name = Release;
 		};
+		C44C4B7574A6D638019818EA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = OrbTuningLab/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.OrbTuningLab;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
 		E70CD6A532BB591F58B1E6E5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -528,6 +592,24 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlantTalkBLE.app/PlantTalkBLE";
+			};
+			name = Release;
+		};
+		EFD974D8D39C54E19A406DBC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = OrbTuningLab/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.OrbTuningLab;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -557,6 +639,15 @@
 			buildConfigurations = (
 				A65F2919BC7E5944D2473448 /* Debug */,
 				7C2E4169A05FC34384D80A56 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E5B6C47E2161A6D5DD1470BE /* Build configuration list for PBXNativeTarget "OrbTuningLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C44C4B7574A6D638019818EA /* Debug */,
+				EFD974D8D39C54E19A406DBC /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

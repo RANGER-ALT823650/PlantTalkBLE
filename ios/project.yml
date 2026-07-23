@@ -12,6 +12,22 @@ packages:
     url: https://github.com/groue/GRDB.swift.git
     from: 7.10.0
 targets:
+  OrbTuningLab:
+    type: application
+    platform: iOS
+    sources:
+      - OrbTuningLab
+    info:
+      path: OrbTuningLab/Info.plist
+      properties:
+        CFBundleDisplayName: 小球调参实验台
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.OrbTuningLab
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ZT3X6444JT
   PlantTalkBLE:
     type: application
     platform: iOS
@@ -38,6 +54,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.PlantTalkBLE
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ZT3X6444JT
         ASSETCATALOG_COMPILER_APPICON_NAME: "AppIcon"
   PlantTalkBLETests:
     type: bundle.unit-test
