@@ -4,10 +4,19 @@ import SwiftUI
 struct RealtimeConversationSheet: View {
     private let conversation: QwenRealtimeConversation?
     private let previewState: RealtimeConversationSheetState
+    /// Height that frames the camera preview at a portrait 4:3 ratio plus the
+    /// bottom controls, so the resting sheet already matches the camera frame.
+    private let cameraFramedHeight: CGFloat
 
+    @StateObject private var camera = RealtimeCameraStreamController()
     @State private var selectedDetent: PresentationDetent
     @State private var mediaSource: ConversationMediaSource?
+    // Whether the capture session is running and streaming frames to the model.
     @State private var isSharingCamera = false
+    // Whether the full-screen camera surface is shown. Minimizing keeps the
+    // session sharing while the sheet falls back to the transcript.
+    @State private var isCameraExpanded = false
+    @State private var isCameraMenuExpanded = false
     @State private var isSendingCameraFrame = false
     @State private var visualStatusText = ""
     @State private var visualAlert: RealtimeVisualAlert?
@@ -17,23 +26,39 @@ struct RealtimeConversationSheet: View {
 
     init(
         conversation: QwenRealtimeConversation,
-        initialDetent: PresentationDetent = .medium
+        containerSize: CGSize = CGSize(width: 393, height: 852)
     ) {
         self.conversation = conversation
         self.previewState = .empty
-        _selectedDetent = State(initialValue: initialDetent)
+        self.cameraFramedHeight = Self.cameraFramedHeight(for: containerSize)
+        _selectedDetent = State(
+            initialValue: .height(Self.cameraFramedHeight(for: containerSize))
+        )
     }
 
     init(
         previewEntries: [RealtimeTranscriptEntry],
-        initialDetent: PresentationDetent = .medium
+        containerSize: CGSize = CGSize(width: 393, height: 852)
     ) {
         self.conversation = nil
         self.previewState = RealtimeConversationSheetState(
             conversationState: .connected,
             entries: previewEntries
         )
-        _selectedDetent = State(initialValue: initialDetent)
+        self.cameraFramedHeight = Self.cameraFramedHeight(for: containerSize)
+        _selectedDetent = State(
+            initialValue: .height(Self.cameraFramedHeight(for: containerSize))
+        )
+    }
+
+    private static func cameraFramedHeight(for containerSize: CGSize) -> CGFloat {
+        let width = containerSize.width > 0 ? containerSize.width : 393
+        let height = containerSize.height > 0 ? containerSize.height : 852
+        // Portrait 4:3 preview (3 wide : 4 tall) plus room for the bottom
+        // controls and the drag indicator.
+        let previewHeight = width * 4.0 / 3.0
+        let chrome: CGFloat = 96
+        return min(previewHeight + chrome, height * 0.94)
     }
 
     private var state: RealtimeConversationSheetState {
@@ -42,32 +67,26 @@ struct RealtimeConversationSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if isSharingCamera {
-                realtimeCamera
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+        ZStack {
+            if isCameraExpanded {
+                cameraStage
+                    .transition(cameraStageTransition)
+            } else {
+                transcriptStage
+                    .transition(.opacity)
             }
-
-            transcript
-                .plantTalkBottomBar {
-                    conversationControls
-                }
-        }
-        .overlay(alignment: .top) {
-            statusHeader
-                .allowsHitTesting(false)
-                .zIndex(1)
         }
         .background {
             ChatConversationBackdrop()
                 .ignoresSafeArea()
         }
-        .presentationDetents([.medium, .large], selection: $selectedDetent)
-        .presentationDragIndicator(.visible)
+        .presentationDetents(sheetDetents, selection: $selectedDetent)
+        .presentationDragIndicator(isCameraExpanded ? .hidden : .visible)
         .presentationContentInteraction(.resizes)
         .presentationCornerRadius(32)
+        // The camera stage fills the sheet, so a downward swipe must not dismiss
+        // the conversation. Users leave it via minimize or end instead.
+        .interactiveDismissDisabled(isCameraExpanded)
         .fullScreenCover(item: $mediaSource) { source in
             ConversationMediaPanel(
                 source: source,
@@ -83,7 +102,51 @@ struct RealtimeConversationSheet: View {
                 dismissButton: .default(Text("知道了"))
             )
         }
-        .animation(.snappy(duration: 0.28), value: isSharingCamera)
+        .onChange(of: camera.state) { _, newState in
+            if case .unavailable(let message) = newState {
+                handleCameraUnavailable(message)
+            }
+        }
+        .onDisappear {
+            visualSendTask?.cancel()
+            visualSendTask = nil
+            camera.stop()
+        }
+        .animation(cameraStageAnimation, value: isCameraExpanded)
+    }
+
+    private var sheetDetents: Set<PresentationDetent> {
+        [.height(cameraFramedHeight), .large]
+    }
+
+    // MARK: - Transcript stage
+
+    private var transcriptStage: some View {
+        transcript
+            .plantTalkBottomBar {
+                conversationControls
+            }
+            .overlay(alignment: .top) {
+                statusHeader
+                    .allowsHitTesting(false)
+                    .zIndex(1)
+            }
+    }
+
+    // MARK: - Camera stage
+
+    private var cameraStage: some View {
+        ZStack {
+            RealtimeCameraStreamView(camera: camera)
+                .ignoresSafeArea()
+
+            VStack {
+                Spacer()
+                cameraStageControls
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+            }
+        }
     }
 
     private var statusHeader: some View {
@@ -169,14 +232,14 @@ struct RealtimeConversationSheet: View {
                     }
                 }
                 .padding(.horizontal)
-                .padding(.top, isSharingCamera ? 8 : 82)
+                .padding(.top, 82)
                 .padding(.bottom, 8)
             }
             .scrollIndicators(.hidden)
             .overlay(alignment: .top) {
                 if state.isWaitingForAssistantText {
                     ModelThinkingIndicator()
-                        .padding(.top, isSharingCamera ? 8 : 74)
+                        .padding(.top, 74)
                         .transition(thinkingTransition)
                 }
             }
@@ -243,13 +306,136 @@ struct RealtimeConversationSheet: View {
         .padding(.bottom, 10)
     }
 
-    private var realtimeCamera: some View {
-        RealtimeCameraStreamView(
-            onFrame: sendCameraFrame,
-            onClose: stopCameraSharing
-        )
-        .frame(height: selectedDetent == .large ? 190 : 128)
-        .accessibilityHint("相机画面按每秒一帧发送给实时模型")
+    // Bottom bar for the expanded camera: minimize · end · menu. The menu
+    // expands upward into flip and torch controls, mirroring the text
+    // conversation's GlassEffectContainer accessory pattern.
+    private var cameraStageControls: some View {
+        HStack(alignment: .bottom) {
+            cameraCircleButton(
+                systemName: "arrow.down.right.and.arrow.up.left",
+                accessibilityLabel: "最小化摄像头",
+                accessibilityHint: "回到文字记录，摄像头继续共享画面"
+            ) {
+                minimizeCamera()
+            }
+
+            Spacer()
+
+            endCameraButton
+
+            Spacer()
+
+            cameraMenu
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var endCameraButton: some View {
+        let label = Image(systemName: "phone.down.fill")
+            .font(.title3.weight(.semibold))
+            .frame(width: 30, height: 30)
+
+        if #available(iOS 26, *) {
+            Button(role: .destructive, action: endConversation) {
+                label
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .tint(Color(uiColor: .systemRed))
+            .accessibilityLabel("退出对话")
+            .accessibilityHint("停止麦克风和模型连接，并保存当前聊天记录")
+        } else {
+            Button(role: .destructive, action: endConversation) {
+                label
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .tint(Color(uiColor: .systemRed))
+            .accessibilityLabel("退出对话")
+            .accessibilityHint("停止麦克风和模型连接，并保存当前聊天记录")
+        }
+    }
+
+    @ViewBuilder
+    private var cameraMenu: some View {
+        if #available(iOS 26, *) {
+            GlassEffectContainer(spacing: 12) {
+                cameraMenuStack
+            }
+        } else {
+            cameraMenuStack
+        }
+    }
+
+    private var cameraMenuStack: some View {
+        VStack(spacing: 12) {
+            if isCameraMenuExpanded {
+                Group {
+                    cameraCircleButton(
+                        systemName: camera.isTorchOn
+                            ? "bolt.fill"
+                            : "bolt.slash.fill",
+                        tint: camera.isTorchOn ? .yellow : nil,
+                        accessibilityLabel: camera.isTorchOn ? "关闭闪光灯" : "打开闪光灯",
+                        action: camera.toggleTorch
+                    )
+                    .disabled(!camera.isTorchAvailable)
+
+                    cameraCircleButton(
+                        systemName: "camera.rotate",
+                        accessibilityLabel: "翻转摄像头",
+                        action: camera.switchCamera
+                    )
+                    .disabled(!camera.canSwitchCamera)
+                }
+                .transition(
+                    .move(edge: .bottom)
+                        .combined(with: .scale(scale: 0.8, anchor: .bottom))
+                        .combined(with: .opacity)
+                )
+            }
+
+            cameraCircleButton(
+                systemName: isCameraMenuExpanded ? "xmark" : "ellipsis",
+                accessibilityLabel: isCameraMenuExpanded ? "收起菜单" : "更多相机选项",
+                action: toggleCameraMenu
+            )
+        }
+        .animation(.snappy(duration: 0.24, extraBounce: 0.08), value: isCameraMenuExpanded)
+    }
+
+    @ViewBuilder
+    private func cameraCircleButton(
+        systemName: String,
+        tint: Color? = nil,
+        accessibilityLabel: String,
+        accessibilityHint: String? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let label = Image(systemName: systemName)
+            .font(.headline)
+            .frame(width: 26, height: 26)
+
+        Group {
+            if #available(iOS 26, *) {
+                Button(action: action) { label }
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .tint(tint)
+            } else {
+                Button(action: action) { label }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .tint(tint ?? .white)
+            }
+        }
+        .accessibilityLabel(accessibilityLabel)
+        .modifier(OptionalAccessibilityHint(hint: accessibilityHint))
     }
 
     private var visualAttachmentMenu: some View {
@@ -278,17 +464,17 @@ struct RealtimeConversationSheet: View {
     }
 
     private var cameraSharingButton: some View {
-        Button(action: toggleCameraSharing) {
-            Image(systemName: isSharingCamera ? "video.slash.fill" : "video.fill")
+        Button(action: openCamera) {
+            Image(systemName: isSharingCamera ? "video.fill" : "video")
                 .font(.headline)
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(.bordered)
         .buttonBorderShape(.circle)
-        .tint(isSharingCamera ? .red : .accentColor)
+        .tint(isSharingCamera ? .green : .accentColor)
         .disabled(state.conversationState != .connected)
-        .accessibilityLabel(isSharingCamera ? "停止共享摄像头" : "共享摄像头")
-        .accessibilityHint("持续预览并按每秒一帧发送给实时模型")
+        .accessibilityLabel(isSharingCamera ? "打开摄像头画面" : "开启摄像头")
+        .accessibilityHint("展开摄像头画面，并按每秒一帧发送给实时模型")
     }
     @ViewBuilder
     private var endConversationButton: some View {
@@ -388,6 +574,16 @@ struct RealtimeConversationSheet: View {
         reduceMotion ? .opacity : .scale.combined(with: .opacity)
     }
 
+    private var cameraStageTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .scale(scale: 1.02))
+    }
+
+    private var cameraStageAnimation: Animation? {
+        reduceMotion ? nil : .snappy(duration: 0.3)
+    }
+
     private func messageTransition(for role: ChatRole) -> AnyTransition {
         guard !reduceMotion else { return .opacity }
         return .move(edge: role == .user ? .trailing : .leading)
@@ -433,13 +629,13 @@ struct RealtimeConversationSheet: View {
     private func endConversation() {
         visualSendTask?.cancel()
         visualSendTask = nil
-        isSharingCamera = false
+        stopCameraSharing()
         conversation?.stop()
         dismiss()
     }
 
     private func openMediaSource(_ source: ConversationMediaSource) {
-        isSharingCamera = false
+        stopCameraSharing()
         visualStatusText = ""
         mediaSource = source
     }
@@ -478,22 +674,52 @@ struct RealtimeConversationSheet: View {
         }
     }
 
-    private func toggleCameraSharing() {
-        if isSharingCamera {
-            stopCameraSharing()
-        } else {
-            visualSendTask?.cancel()
-            visualSendTask = nil
-            conversation?.clearPinnedStillImage()
-            visualStatusText = "摄像头已共享，画面会和你的语音一起理解"
+    /// Opens the full-screen camera stage. Starts the capture session the first
+    /// time; a session that is already streaming (after a minimize) is reused.
+    private func openCamera() {
+        guard state.conversationState == .connected else { return }
+        visualSendTask?.cancel()
+        visualSendTask = nil
+        conversation?.clearPinnedStillImage()
+
+        if !isSharingCamera {
             isSharingCamera = true
+            camera.start(onFrame: sendCameraFrame)
         }
+        isCameraExpanded = true
+        selectedDetent = .large
+    }
+
+    /// Collapses the camera stage back to the transcript while the session keeps
+    /// streaming frames to the model in the background.
+    private func minimizeCamera() {
+        isCameraMenuExpanded = false
+        isCameraExpanded = false
+        selectedDetent = .height(cameraFramedHeight)
+        visualStatusText = "摄像头在后台继续共享，随时可展开画面"
     }
 
     private func stopCameraSharing() {
+        isCameraExpanded = false
+        isCameraMenuExpanded = false
         isSharingCamera = false
         isSendingCameraFrame = false
-        visualStatusText = "摄像头共享已停止，仍可继续语音对话"
+        camera.stop()
+    }
+
+    private func toggleCameraMenu() {
+        withAnimation(.snappy(duration: 0.24, extraBounce: 0.08)) {
+            isCameraMenuExpanded.toggle()
+        }
+    }
+
+    private func handleCameraUnavailable(_ message: String) {
+        guard isSharingCamera else { return }
+        stopCameraSharing()
+        visualAlert = RealtimeVisualAlert(
+            title: "摄像头共享已停止",
+            message: message
+        )
     }
 
     private func sendCameraFrame(_ data: Data) {
@@ -540,6 +766,19 @@ private struct RealtimeVisualAlert: Identifiable {
     let id = UUID()
     let title: String
     let message: String
+}
+
+private struct OptionalAccessibilityHint: ViewModifier {
+    let hint: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let hint {
+            content.accessibilityHint(hint)
+        } else {
+            content
+        }
+    }
 }
 
 @MainActor
@@ -648,22 +887,17 @@ extension RealtimeTranscriptEntry {
 }
 
 #Preview(
-    "实时语音对话记录 · 展开",
+    "实时语音对话记录 · 4:3 静息",
     traits: .fixedLayout(width: 393, height: 852)
 ) {
-    RealtimeConversationSheetPreviewHost(initialDetent: .large)
-}
-
-#Preview(
-    "实时语音对话记录 · 半屏",
-    traits: .fixedLayout(width: 393, height: 852)
-) {
-    RealtimeConversationSheetPreviewHost(initialDetent: .medium)
+    RealtimeConversationSheetPreviewHost(
+        containerSize: CGSize(width: 393, height: 852)
+    )
 }
 
 @MainActor
 private struct RealtimeConversationSheetPreviewHost: View {
-    let initialDetent: PresentationDetent
+    let containerSize: CGSize
 
     @State private var isPresented = true
 
@@ -673,7 +907,7 @@ private struct RealtimeConversationSheetPreviewHost: View {
             .sheet(isPresented: $isPresented) {
                 RealtimeConversationSheet(
                     previewEntries: realtimeConversationPreviewEntries,
-                    initialDetent: initialDetent
+                    containerSize: containerSize
                 )
             }
     }

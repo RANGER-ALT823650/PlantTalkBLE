@@ -1023,6 +1023,9 @@ final class RealtimeCameraStreamController: NSObject, ObservableObject,
 
     @Published private(set) var state: RealtimeCameraStreamState = .idle
     @Published private(set) var cameraPosition: AVCaptureDevice.Position = .back
+    @Published private(set) var isTorchOn = false
+    @Published private(set) var isTorchAvailable = false
+    @Published private(set) var canSwitchCamera = false
 
     private let videoOutput = AVCaptureVideoDataOutput()
     private let captureQueue = DispatchQueue(
@@ -1074,6 +1077,7 @@ final class RealtimeCameraStreamController: NSObject, ObservableObject,
             self.lastFrameTimestamp = nil
             DispatchQueue.main.async {
                 self.state = .idle
+                self.isTorchOn = false
             }
         }
     }
@@ -1091,9 +1095,38 @@ final class RealtimeCameraStreamController: NSObject, ObservableObject,
                 DispatchQueue.main.async {
                     self.cameraPosition = nextPosition
                 }
+                self.publishCameraCapabilities()
             } catch {
                 DispatchQueue.main.async {
                     self.state = .unavailable(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Toggles the continuous-on torch. A video stream has no flashMode, so
+    /// illumination for the shared frames comes from the capture device torch.
+    func toggleTorch() {
+        captureQueue.async { [weak self] in
+            guard let self,
+                  let device = self.cameraInput?.device,
+                  device.hasTorch,
+                  device.isTorchAvailable else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                let shouldEnable = device.torchMode != .on
+                if shouldEnable {
+                    try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                } else {
+                    device.torchMode = .off
+                }
+                DispatchQueue.main.async {
+                    self.isTorchOn = shouldEnable
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isTorchOn = false
                 }
             }
         }
@@ -1134,6 +1167,7 @@ final class RealtimeCameraStreamController: NSObject, ObservableObject,
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
+                self.publishCameraCapabilities()
                 DispatchQueue.main.async {
                     self.state = .streaming
                 }
@@ -1142,6 +1176,31 @@ final class RealtimeCameraStreamController: NSObject, ObservableObject,
                     self.state = .unavailable(error.localizedDescription)
                 }
             }
+        }
+    }
+
+    /// Called on `captureQueue` after the session starts or the input changes.
+    /// Torch belongs to the active device, so front cameras report it absent.
+    private func publishCameraCapabilities() {
+        let device = cameraInput?.device
+        let supportsTorch = device?.hasTorch == true && device?.isTorchAvailable == true
+        let torchIsOn = device?.torchMode == .on
+        let supportsFrontCamera = AVCaptureDevice.default(
+            .builtInWideAngleCamera,
+            for: .video,
+            position: .front
+        ) != nil
+        let supportsBackCamera = AVCaptureDevice.default(
+            .builtInWideAngleCamera,
+            for: .video,
+            position: .back
+        ) != nil
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isTorchAvailable = supportsTorch
+            self.isTorchOn = supportsTorch && torchIsOn
+            self.canSwitchCamera = supportsFrontCamera && supportsBackCamera
         }
     }
 
@@ -1309,74 +1368,77 @@ private struct RealtimeCameraPreview: UIViewRepresentable {
     }
 }
 
+/// A controlled preview surface for realtime visual sharing. The owning view
+/// holds the `RealtimeCameraStreamController`, so minimizing the sheet can
+/// remove this preview layer while capture keeps streaming frames in the
+/// background. All controls now live in the sheet's bottom bar.
 @MainActor
 struct RealtimeCameraStreamView: View {
-    let onFrame: (Data) -> Void
-    let onClose: () -> Void
-
-    @StateObject private var camera = RealtimeCameraStreamController()
+    @ObservedObject var camera: RealtimeCameraStreamController
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            RealtimeCameraPreview(session: camera.session)
-                .background(Color.black)
+        GeometryReader { proxy in
+            ZStack {
+                RealtimeCameraPreview(session: camera.session)
+                    .background(Color.black)
 
-            if camera.state == .preparing || camera.state == .idle {
-                ProgressView("正在启动摄像头…")
-                    .tint(.white)
+                if camera.state == .preparing || camera.state == .idle {
+                    ProgressView("正在启动摄像头…")
+                        .tint(.white)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if case .unavailable(let message) = camera.state {
+                    ContentUnavailableView {
+                        Label("相机不可用", systemImage: "camera.fill")
+                    } description: {
+                        Text(message)
+                    }
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+                }
 
-            if case .unavailable(let message) = camera.state {
-                ContentUnavailableView {
-                    Label("相机不可用", systemImage: "camera.fill")
-                } description: {
-                    Text(message)
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 8, height: 8)
+                    Text("视觉共享 · 每秒 1 帧")
+                        .font(.caption.weight(.medium))
                 }
                 .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.52), in: Capsule())
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(16)
             }
-
-            HStack(spacing: 10) {
-                Button(action: camera.switchCamera) {
-                    Image(systemName: "camera.rotate")
-                        .frame(width: 34, height: 34)
-                }
-                .accessibilityLabel("切换前后摄像头")
-
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .frame(width: 34, height: 34)
-                }
-                .accessibilityLabel("停止共享摄像头")
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .tint(.white)
-            .padding(10)
-
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(.red)
-                    .frame(width: 8, height: 8)
-                Text("视觉共享 · 每秒 1 帧")
-                    .font(.caption.weight(.medium))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.black.opacity(0.52), in: Capsule())
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-            .padding(10)
+            // Clip the preview to the device's own bezel radius so the frame
+            // reads as concentric with the iPhone screen corners, matching the
+            // text conversation's custom sheet.
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: screenCornerRadius(for: proxy),
+                    style: .continuous
+                )
+            )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .onAppear {
-            camera.start(onFrame: onFrame)
+    }
+
+    private func screenCornerRadius(for proxy: GeometryProxy) -> CGFloat {
+        if #available(iOS 26, *) {
+            let insets = proxy.containerCornerInsets
+            let radius = [
+                insets.topLeading.height,
+                insets.topTrailing.height,
+                insets.bottomLeading.height,
+                insets.bottomTrailing.height
+            ].max() ?? 0
+            if radius > 0 { return radius }
         }
-        .onDisappear {
-            camera.stop()
-        }
+        // Fallback for pre-iOS 26 / non-notched hardware: the modern Face ID
+        // iPhone display corner radius.
+        return 55
     }
 }
 
