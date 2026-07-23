@@ -1,9 +1,94 @@
 import AVFAudio
 import Combine
+import CoreHaptics
 import SwiftUI
 import UIKit
 
 let messageFlightCoordinateSpace = "plant-talk-message-flight"
+
+/// Plays the "Soft Swell" success haptic used to confirm a realtime connection.
+/// A single ~0.45s continuous vibration whose intensity follows a bell-shaped
+/// envelope (quick rise, brief peak, gentle fall), giving a lingering feel that
+/// is clearly more than a single tap without dragging on. Falls back to the
+/// system success notification when Core Haptics is unavailable (simulator or
+/// unsupported hardware).
+@MainActor
+final class RealtimeConnectionHaptic {
+    private var engine: CHHapticEngine?
+    private let supportsHaptics = CHHapticEngine
+        .capabilitiesForHardware()
+        .supportsHaptics
+
+    func prepare() {
+        guard supportsHaptics, engine == nil else { return }
+        do {
+            let engine = try CHHapticEngine()
+            engine.isAutoShutdownEnabled = true
+            // A reset drops the running instance; rebuild lazily on next play.
+            engine.resetHandler = { [weak self] in
+                try? self?.engine?.start()
+            }
+            try engine.start()
+            self.engine = engine
+        } catch {
+            engine = nil
+        }
+    }
+
+    func playSuccess() {
+        guard supportsHaptics else {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            return
+        }
+        if engine == nil { prepare() }
+        guard let engine else {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            return
+        }
+
+        let swell = CHHapticEvent(
+            eventType: .hapticContinuous,
+            parameters: [
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.7),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
+            ],
+            relativeTime: 0,
+            duration: 0.45
+        )
+        // Bell-shaped intensity: quick rise → peak → gentle fall.
+        let bellCurve = CHHapticParameterCurve(
+            parameterID: .hapticIntensityControl,
+            controlPoints: [
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.15),
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0.14, value: 0.95),
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0.26, value: 0.85),
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.0)
+            ],
+            relativeTime: 0
+        )
+        // Sharpness lifts slightly so the tail reads brighter, not muffled.
+        let sharpnessCurve = CHHapticParameterCurve(
+            parameterID: .hapticSharpnessControl,
+            controlPoints: [
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.2),
+                CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.5)
+            ],
+            relativeTime: 0
+        )
+
+        do {
+            try engine.start()
+            let pattern = try CHHapticPattern(
+                events: [swell],
+                parameterCurves: [bellCurve, sharpnessCurve]
+            )
+            let player = try engine.makePlayer(with: pattern)
+            try player.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+    }
+}
 
 struct MessageFlightRequest: Equatable {
     let id: UUID
@@ -120,6 +205,7 @@ struct ContentView: View {
     @State private var textChatStartError: String?
     @State private var isTextChatStartErrorPresented = false
     @State private var plantArtwork: PlantArtwork?
+    @State private var connectionHaptic = RealtimeConnectionHaptic()
     @FocusState private var isHomeTextComposerFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -175,11 +261,19 @@ struct ContentView: View {
                         scheduleMessageFlightDestinationValidation()
                     }
                     .sheet(isPresented: $isRealtimeTranscriptPresented) {
-                        RealtimeConversationSheet(conversation: realtimeConversation)
+                        RealtimeConversationSheet(
+                            conversation: realtimeConversation,
+                            containerSize: geometry.size
+                        )
                     }
-                    .onChange(of: realtimeConversation.state) { _, state in
+                    .onChange(of: realtimeConversation.state) { previous, state in
                         if case .error = state {
                             isRealtimeTranscriptPresented = true
+                        }
+                        // Connection success is conveyed by the Soft Swell haptic
+                        // only, since the orb no longer changes color between states.
+                        if state == .connected, previous != .connected {
+                            connectionHaptic.playSuccess()
                         }
                     }
                     .simultaneousGesture(
@@ -896,6 +990,9 @@ struct ContentView: View {
             return
         }
 
+        // Warm up the haptic engine now so the success buzz fires without a
+        // cold-start delay the moment the connection lands.
+        connectionHaptic.prepare()
         Task {
             await realtimeConversation.start()
         }
@@ -2020,15 +2117,10 @@ private struct PrimaryInteractionButton: View {
         )
     }
 
+    // The orb keeps a single tint across every state. Connection success is
+    // signaled by haptics instead of a color change.
     private var buttonTint: Color {
-        switch realtimeConversationState {
-        case .connected:
-            .green
-        case .requestingPermission, .preparingAudio, .connecting:
-            .orange
-        case .idle, .error:
-            .accentColor
-        }
+        .accentColor
     }
 
     private var animationActivity: Double {
