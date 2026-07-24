@@ -1113,40 +1113,164 @@ struct PlantArtworkEditorPreview: View {
     }
 }
 
-/// A thin wrapper over the system camera (UIImagePickerController).
-struct SystemCameraPicker: UIViewControllerRepresentable {
+/// A responsive camera view using AVFoundation that captures photos instantly on
+/// shutter press without showing the system's "Retake / Use Photo" confirmation UI.
+struct SystemCameraPicker: View {
     let onImage: (UIImage?) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var camera = DirectCameraController()
 
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.sourceType = .camera
-        picker.delegate = context.coordinator
-        return picker
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if camera.isReady {
+                DirectCameraPreview(session: camera.session)
+                    .ignoresSafeArea()
+            } else if let error = camera.errorMessage {
+                VStack(spacing: 12) {
+                    Text("无法启动相机")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            } else {
+                ProgressView()
+                    .tint(.white)
+            }
+
+            VStack {
+                HStack {
+                    Button {
+                        onImage(nil)
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 54)
+
+                Spacer()
+
+                Button {
+                    camera.capturePhoto { image in
+                        onImage(image)
+                        dismiss()
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .stroke(.white, lineWidth: 4)
+                            .frame(width: 72, height: 72)
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 60, height: 60)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!camera.isReady)
+                .padding(.bottom, 40)
+            }
+        }
+        .onAppear { camera.start() }
+        .onDisappear { camera.stop() }
+    }
+}
+
+private final class DirectCameraController: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+    @Published var isReady = false
+    @Published var errorMessage: String?
+
+    let session = AVCaptureSession()
+    private let photoOutput = AVCapturePhotoOutput()
+    private let sessionQueue = DispatchQueue(label: "direct.camera.queue")
+    private var completion: ((UIImage?) -> Void)?
+
+    func start() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                self.session.beginConfiguration()
+                self.session.sessionPreset = .photo
+                guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                      let input = try? AVCaptureDeviceInput(device: device),
+                      self.session.canAddInput(input),
+                      self.session.canAddOutput(self.photoOutput) else {
+                    DispatchQueue.main.async { self.errorMessage = "请在设置中允许相机权限。" }
+                    return
+                }
+                self.session.addInput(input)
+                self.session.addOutput(self.photoOutput)
+                self.photoOutput.maxPhotoQualityPrioritization = .speed
+                self.session.commitConfiguration()
+                self.session.startRunning()
+
+                DispatchQueue.main.async {
+                    self.isReady = true
+                }
+            }
+        }
     }
 
-    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onImage: onImage)
+    func stop() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
     }
 
-    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        private let onImage: (UIImage?) -> Void
-
-        init(onImage: @escaping (UIImage?) -> Void) {
-            self.onImage = onImage
+    func capturePhoto(completion: @escaping (UIImage?) -> Void) {
+        self.completion = completion
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .speed
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
+    }
 
-        func imagePickerController(
-            _ picker: UIImagePickerController,
-            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-        ) {
-            onImage(info[.originalImage] as? UIImage)
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let image: UIImage?
+        if let data = photo.fileDataRepresentation() {
+            image = UIImage(data: data)
+        } else {
+            image = nil
         }
+        DispatchQueue.main.async {
+            self.completion?(image)
+            self.completion = nil
+        }
+    }
+}
 
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            onImage(nil)
-        }
+private struct DirectCameraPreview: UIViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeUIView(context: Context) -> DirectCameraPreviewView {
+        let view = DirectCameraPreviewView()
+        view.previewLayer.session = session
+        view.previewLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ uiView: DirectCameraPreviewView, context: Context) {}
+}
+
+private final class DirectCameraPreviewView: UIView {
+    override class var layerClass: AnyClass {
+        AVCaptureVideoPreviewLayer.self
+    }
+
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        layer as! AVCaptureVideoPreviewLayer
     }
 }
 
