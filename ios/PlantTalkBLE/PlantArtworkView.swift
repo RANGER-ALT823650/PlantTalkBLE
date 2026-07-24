@@ -94,31 +94,26 @@ private struct DotBrushField: View {
     /// Every dot shares one color. The single grid dot nearest the traveling point
     /// is the largest; within the brush radius, dot radius falls off from the
     /// center outward, reaching the normal radius at the brush edge.
+    /// Every dot shares one color. Dots near the continuous traveling point swell
+    /// smoothly with a cosine falloff from centerDotRadius at the center down to
+    /// dotRadius at the brush edge, avoiding grid-snapping choppiness.
     private static func draw(
         dots: [MaskDot],
         center: CGPoint,
         in context: GraphicsContext
     ) {
-        // Snap the brush center to its nearest grid dot so that dot peaks exactly.
-        var nearestIndex = 0
-        var nearestDistance = CGFloat.greatestFiniteMagnitude
-        for (index, dot) in dots.enumerated() {
-            let distance = hypot(dot.position.x - center.x, dot.position.y - center.y)
-            if distance < nearestDistance {
-                nearestDistance = distance
-                nearestIndex = index
-            }
-        }
         guard !dots.isEmpty else { return }
-        let anchor = dots[nearestIndex].position
-        let brushRadius = max(spacing * 2, min(context.clipBoundingRect.width, context.clipBoundingRect.height) * brushRadiusRatio)
+        let brushRadius = max(
+            spacing * 2,
+            min(context.clipBoundingRect.width, context.clipBoundingRect.height) * brushRadiusRatio
+        )
 
         for dot in dots {
-            let distance = hypot(dot.position.x - anchor.x, dot.position.y - anchor.y)
+            let distance = hypot(dot.position.x - center.x, dot.position.y - center.y)
             var radius = dotRadius
             if distance < brushRadius {
-                // Linear falloff: centerDotRadius at the anchor → dotRadius at edge.
-                let falloff = 1 - distance / brushRadius
+                let norm = distance / brushRadius
+                let falloff = 0.5 * (1 + cos(.pi * norm))
                 radius = dotRadius + (centerDotRadius - dotRadius) * falloff
             }
             let rect = CGRect(
@@ -201,7 +196,7 @@ struct GenerationMaskPreview: View {
 
     private var toggle: some View {
         Button {
-            withAnimation(.smooth(duration: 0.45)) {
+            withAnimation(.easeInOut(duration: 0.4)) {
                 isGenerating.toggle()
             }
         } label: {
@@ -212,7 +207,7 @@ struct GenerationMaskPreview: View {
     }
 
     private var maskTransition: AnyTransition {
-        .opacity.combined(with: .scale(scale: 0.92))
+        .opacity
     }
 }
 
@@ -476,10 +471,7 @@ struct PlantArtworkControl: View {
     }
 
     private var generationMaskTransition: AnyTransition {
-        if reduceMotion {
-            return .opacity
-        }
-        return .opacity.combined(with: .scale(scale: 0.92))
+        .opacity
     }
 
     @ViewBuilder
@@ -530,7 +522,7 @@ struct PlantArtworkControl: View {
     /// request runs and swaps in the generated image (keeping the crop transform).
     private func startGeneration(_ request: PlantArtworkGenerationRequest) {
         generationTask?.cancel()
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.45)) {
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .easeInOut(duration: 0.4)) {
             isGeneratingImage = true
         }
 
@@ -563,7 +555,7 @@ struct PlantArtworkControl: View {
     }
 
     private func finishGeneration() {
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.45)) {
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .easeInOut(duration: 0.4)) {
             isGeneratingImage = false
         }
         generationTask = nil
