@@ -20,6 +20,8 @@ targets:
       - path: PlantTalkBLE/PlantArtworkView.swift
       - path: PlantTalkBLE/AIConfiguration.swift
       - path: PlantTalkBLE/PlantImageGenerationClient.swift
+      - path: PlantTalkBLE/CameraCaptureView.swift
+      - path: PlantTalkBLE/ChatModels.swift
     info:
       path: ArtworkPreviewLab/Info.plist
       properties:

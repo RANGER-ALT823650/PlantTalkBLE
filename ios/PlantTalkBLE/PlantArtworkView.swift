@@ -395,15 +395,19 @@ struct PlantArtworkControl: View {
                 await loadImage(from: selectedPhotoItem)
             }
             .fullScreenCover(isPresented: $isCameraPresented) {
-                SystemCameraPicker { image in
-                    isCameraPresented = false
-                    guard let image else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        editorDraft = PlantArtworkDraft(
-                            artwork: PlantArtwork(image: image, scale: 1, normalizedOffset: .zero)
-                        )
+                ConversationMediaPanel(
+                    source: .camera,
+                    onDismiss: { isCameraPresented = false },
+                    onAttachments: { attachments in
+                        isCameraPresented = false
+                        guard let image = attachments.first?.image else { return }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            editorDraft = PlantArtworkDraft(
+                                artwork: PlantArtwork(image: image, scale: 1, normalizedOffset: .zero)
+                            )
+                        }
                     }
-                }
+                )
                 .ignoresSafeArea()
             }
             .sheet(item: $editorDraft) { draft in
@@ -751,7 +755,8 @@ private struct PlantArtworkEditorView: View {
         }
         .presentationDetents([.fraction(0.78), .large])
         .presentationDragIndicator(.visible)
-        .presentationCornerRadius(32)
+        .presentationCornerRadius(44)
+        .clipShape(RoundedRectangle(cornerRadius: 44, style: .continuous))
         .interactiveDismissDisabled(hasUnsavedTransformChanges)
     }
 
