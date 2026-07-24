@@ -755,8 +755,7 @@ private struct PlantArtworkEditorView: View {
         }
         .presentationDetents([.fraction(0.78), .large])
         .presentationDragIndicator(.visible)
-        .presentationCornerRadius(44)
-        .clipShape(RoundedRectangle(cornerRadius: 44, style: .continuous))
+        .presentationCornerRadius(32)
         .interactiveDismissDisabled(hasUnsavedTransformChanges)
     }
 
