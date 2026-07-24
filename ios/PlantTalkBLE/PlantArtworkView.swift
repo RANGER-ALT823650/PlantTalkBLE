@@ -1,3 +1,4 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -753,17 +754,24 @@ private struct PlantArtworkEditorView: View {
     }
 
     private func editorContent(frameSize: CGSize, frameWidth: CGFloat) -> some View {
-        VStack(spacing: 18) {
-            Spacer(minLength: 12)
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(spacing: 20) {
+                cropFrameWithControls(size: frameSize, frameWidth: frameWidth)
 
-            cropFrameWithControls(size: frameSize, frameWidth: frameWidth)
-
-            adjustmentHint
-
-            Spacer(minLength: 12)
+                HStack(alignment: .center) {
+                    resetButton
+                    Spacer()
+                    adjustmentHint
+                    Spacer()
+                    generateButton
+                }
+                .padding(.horizontal, 4)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
-        .padding(.horizontal, 20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollDismissesKeyboard(.interactively)
         .contentShape(Rectangle())
         .onTapGesture {
             if isPromptExpanded {
@@ -776,14 +784,6 @@ private struct PlantArtworkEditorView: View {
         cropFrame(size: size)
             .overlay(alignment: .topTrailing) {
                 promptControl(frameWidth: frameWidth)
-                    .padding(12)
-            }
-            .overlay(alignment: .bottomLeading) {
-                resetButton
-                    .padding(12)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                generateButton
                     .padding(12)
             }
     }
@@ -953,8 +953,6 @@ private struct PlantArtworkEditorView: View {
         }
     }
 
-    /// Resolve the prompt, hand the source image and current crop transform back
-    /// to the control, then dismiss so the mask animation runs on the home card.
     private func startGeneration() {
         let trimmed = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = trimmed.isEmpty ? defaultPrompt : trimmed
@@ -981,8 +979,7 @@ private struct PlantArtworkEditorView: View {
 
     private func cropFrameWidth(in availableSize: CGSize) -> CGFloat {
         let horizontalLimit = max(1, availableSize.width - 40)
-        let verticalLimit = max(1, (availableSize.height - 150) * 3 / 4)
-        return min(440, min(horizontalLimit, verticalLimit))
+        return min(340, horizontalLimit)
     }
 
     private func dragGesture(frameSize: CGSize) -> some Gesture {
@@ -1048,10 +1045,25 @@ private struct PlantArtworkEditorView: View {
     }
 
     private func saveArtwork() {
+        let clamped = PlantArtworkCrop.clampedScale(scale)
+        let pointOffset = PlantArtworkCrop.pointOffset(
+            from: normalizedOffset,
+            in: CGSize(width: 320, height: 426.666)
+        )
+        let clampedOffset = PlantArtworkCrop.clampedOffset(
+            pointOffset,
+            imageSize: draft.artwork.image.size,
+            frameSize: CGSize(width: 320, height: 426.666),
+            scale: clamped
+        )
+
         artwork = PlantArtwork(
             image: draft.artwork.image,
-            scale: PlantArtworkCrop.clampedScale(scale),
-            normalizedOffset: normalizedOffset
+            scale: clamped,
+            normalizedOffset: PlantArtworkCrop.normalizedOffset(
+                from: clampedOffset,
+                in: CGSize(width: 320, height: 426.666)
+            )
         )
         dismiss()
     }
@@ -1099,42 +1111,164 @@ struct PlantArtworkEditorPreview: View {
     }
 }
 
-/// A thin wrapper over the system camera. Presenting this directly opens the
-/// native camera UI, matching "拍摄图片" launching straight into the camera.
-struct SystemCameraPicker: UIViewControllerRepresentable {
+/// A responsive camera view using AVFoundation that captures photos instantly on
+/// shutter press without showing the system's "Retake / Use Photo" confirmation UI.
+struct SystemCameraPicker: View {
     let onImage: (UIImage?) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var camera = DirectCameraController()
 
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.sourceType = .camera
-        picker.delegate = context.coordinator
-        return picker
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if camera.isReady {
+                DirectCameraPreview(session: camera.session)
+                    .ignoresSafeArea()
+            } else if let error = camera.errorMessage {
+                VStack(spacing: 12) {
+                    Text("无法启动相机")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            } else {
+                ProgressView()
+                    .tint(.white)
+            }
+
+            VStack {
+                HStack {
+                    Button {
+                        onImage(nil)
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 54)
+
+                Spacer()
+
+                Button {
+                    camera.capturePhoto { image in
+                        onImage(image)
+                        dismiss()
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .stroke(.white, lineWidth: 4)
+                            .frame(width: 72, height: 72)
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 60, height: 60)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!camera.isReady)
+                .padding(.bottom, 40)
+            }
+        }
+        .onAppear { camera.start() }
+        .onDisappear { camera.stop() }
+    }
+}
+
+private final class DirectCameraController: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+    @Published var isReady = false
+    @Published var errorMessage: String?
+
+    let session = AVCaptureSession()
+    private let photoOutput = AVCapturePhotoOutput()
+    private let sessionQueue = DispatchQueue(label: "direct.camera.queue")
+    private var completion: ((UIImage?) -> Void)?
+
+    func start() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                self.session.beginConfiguration()
+                self.session.sessionPreset = .photo
+                guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                      let input = try? AVCaptureDeviceInput(device: device),
+                      self.session.canAddInput(input),
+                      self.session.canAddOutput(self.photoOutput) else {
+                    DispatchQueue.main.async { self.errorMessage = "请在设置中允许相机权限。" }
+                    return
+                }
+                self.session.addInput(input)
+                self.session.addOutput(self.photoOutput)
+                self.photoOutput.maxPhotoQualityPrioritization = .speed
+                self.session.commitConfiguration()
+                self.session.startRunning()
+
+                DispatchQueue.main.async {
+                    self.isReady = true
+                }
+            }
+        }
     }
 
-    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onImage: onImage)
+    func stop() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
     }
 
-    final class Coordinator: NSObject, UIImagePickerControllerDelegate,
-        UINavigationControllerDelegate {
-        private let onImage: (UIImage?) -> Void
-
-        init(onImage: @escaping (UIImage?) -> Void) {
-            self.onImage = onImage
+    func capturePhoto(completion: @escaping (UIImage?) -> Void) {
+        self.completion = completion
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .speed
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
+    }
 
-        func imagePickerController(
-            _ picker: UIImagePickerController,
-            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-        ) {
-            onImage(info[.originalImage] as? UIImage)
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let image: UIImage?
+        if let data = photo.fileDataRepresentation() {
+            image = UIImage(data: data)
+        } else {
+            image = nil
         }
+        DispatchQueue.main.async {
+            self.completion?(image)
+            self.completion = nil
+        }
+    }
+}
 
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            onImage(nil)
-        }
+private struct DirectCameraPreview: UIViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeUIView(context: Context) -> DirectCameraPreviewView {
+        let view = DirectCameraPreviewView()
+        view.previewLayer.session = session
+        view.previewLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ uiView: DirectCameraPreviewView, context: Context) {}
+}
+
+private final class DirectCameraPreviewView: UIView {
+    override class var layerClass: AnyClass {
+        AVCaptureVideoPreviewLayer.self
+    }
+
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        layer as! AVCaptureVideoPreviewLayer
     }
 }
 
