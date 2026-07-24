@@ -659,46 +659,9 @@ struct TextConversationView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 12) {
-                    if !isInitialMessageDiscarded {
-                        InitialTextMessageBubble(
-                            text: initialMessage,
-                            createdAt: initialMessageDate,
-                            transitionID: initialMessageID,
-                            isTransitionComplete: isInitialTransitionComplete
-                        )
-                        .id(initialMessageID)
-                    }
-
-                    ForEach(messages) { message in
-                        if message.id != initialMessageID {
-                            ChatMessageBubble(
-                                message: message,
-                                activeImagePreviewSourceID: imagePreviewItem?.id,
-                                onImagePreview: presentImagePreview,
-                                flightDestinationID: outgoingTransition?.id == message.id
-                                    && outgoingTransition?.presentation == .messageFlight
-                                    ? message.id
-                                    : nil,
-                                reportsFlightDestination: flightDestinationReadyID == message.id,
-                                isFlightComplete: outgoingTransition?.presentation != .messageFlight
-                                    || outgoingTransition?.id != message.id
-                                    || completedMessageFlightID == message.id
-                            )
-                            .id(message.id)
-                        }
-                    }
-
-                    StreamingAssistantMessageRow(
-                        state: streamingAssistantState,
-                        isPresentationEnabled: assistantPresentation.isOpen
-                    )
-                    .id(StreamingAssistantMessageRow.anchorID)
-
-                    ConversationBottomMarker()
-                }
-                .padding()
-                .padding(.top)
+                messageList
+                    .padding()
+                    .padding(.top)
             }
             .trackConversationBottom($isScrolledToBottom)
             .plantTalkBottomBar {
@@ -715,48 +678,7 @@ struct TextConversationView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in
-                // Assistant growth and completion must never pull a reader away
-                // from the part of the transcript they chose to inspect.
-                if messages.last?.role == .assistant {
-                    return
-                }
-
-                if !isInitialTransitionComplete,
-                   messages.last?.id == initialMessageID {
-                    return
-                }
-
-                if let pendingCatchUpMessageID,
-                   messages.last?.id == pendingCatchUpMessageID {
-                    self.pendingCatchUpMessageID = nil
-                    scrollToLatest(
-                        using: proxy,
-                        animation: reduceMotion
-                            ? nil
-                            : .easeOut(duration: ConversationMotion.catchUpDuration)
-                    )
-                    completeAssistantPresentationAfterCatchUp(
-                        id: pendingCatchUpMessageID
-                    )
-                    return
-                }
-
-                if let outgoing = outgoingTransition,
-                   outgoing.presentation == .messageFlight,
-                   messages.last?.id == outgoing.id {
-                    scrollToLatest(using: proxy, animation: nil)
-                    prepareMessageFlightDestination(
-                        id: outgoing.id
-                    )
-                    return
-                }
-
-                scrollToLatest(
-                    using: proxy,
-                    animation: outgoingTransition?.presentation == .messageFlight
-                        ? nil
-                        : .easeOut(duration: 0.2)
-                )
+                handleMessageCountChange(proxy: proxy)
             }
             .task {
                 startInitialMessage()
@@ -838,6 +760,109 @@ struct TextConversationView: View {
         } message: {
             Text(errorMessage ?? "未知错误")
         }
+    }
+
+    /// Keep the transcript pinned to the latest message when appropriate.
+    /// Extracted from the `.onChange` closure in `body` so the ViewBuilder does
+    /// not type-check this branching logic as part of the view expression.
+    private func handleMessageCountChange(proxy: ScrollViewProxy) {
+        // Assistant growth and completion must never pull a reader away
+        // from the part of the transcript they chose to inspect.
+        if messages.last?.role == .assistant {
+            return
+        }
+
+        if !isInitialTransitionComplete,
+           messages.last?.id == initialMessageID {
+            return
+        }
+
+        if let pendingCatchUpMessageID,
+           messages.last?.id == pendingCatchUpMessageID {
+            self.pendingCatchUpMessageID = nil
+            scrollToLatest(
+                using: proxy,
+                animation: reduceMotion
+                    ? nil
+                    : .easeOut(duration: ConversationMotion.catchUpDuration)
+            )
+            completeAssistantPresentationAfterCatchUp(
+                id: pendingCatchUpMessageID
+            )
+            return
+        }
+
+        if let outgoing = outgoingTransition,
+           outgoing.presentation == .messageFlight,
+           messages.last?.id == outgoing.id {
+            scrollToLatest(using: proxy, animation: nil)
+            prepareMessageFlightDestination(
+                id: outgoing.id
+            )
+            return
+        }
+
+        scrollToLatest(
+            using: proxy,
+            animation: outgoingTransition?.presentation == .messageFlight
+                ? nil
+                : .easeOut(duration: 0.2)
+        )
+    }
+
+    /// The scrolling transcript. Extracted from `body` so the ViewBuilder
+    /// type-checks this list independently of the long modifier chain below,
+    /// keeping either expression well under the compiler's time limit.
+    private var messageList: some View {
+        LazyVStack(spacing: 12) {
+            if !isInitialMessageDiscarded {
+                InitialTextMessageBubble(
+                    text: initialMessage,
+                    createdAt: initialMessageDate,
+                    transitionID: initialMessageID,
+                    isTransitionComplete: isInitialTransitionComplete
+                )
+                .id(initialMessageID)
+            }
+
+            ForEach(messages) { message in
+                if message.id != initialMessageID {
+                    ChatMessageBubble(
+                        message: message,
+                        activeImagePreviewSourceID: imagePreviewItem?.id,
+                        onImagePreview: presentImagePreview,
+                        flightDestinationID: flightDestinationID(for: message),
+                        reportsFlightDestination: flightDestinationReadyID == message.id,
+                        isFlightComplete: isFlightComplete(for: message)
+                    )
+                    .id(message.id)
+                }
+            }
+
+            StreamingAssistantMessageRow(
+                state: streamingAssistantState,
+                isPresentationEnabled: assistantPresentation.isOpen
+            )
+            .id(StreamingAssistantMessageRow.anchorID)
+
+            ConversationBottomMarker()
+        }
+    }
+
+    /// The message flight destination for `message`, if this row is the live
+    /// flight target. Pulled out of the `ForEach` body so the ViewBuilder does
+    /// not have to type-check the optional-chained ternary inline.
+    private func flightDestinationID(for message: ChatMessage) -> UUID? {
+        let isFlightTarget = outgoingTransition?.id == message.id
+            && outgoingTransition?.presentation == .messageFlight
+        return isFlightTarget ? message.id : nil
+    }
+
+    /// Whether `message`'s flight animation is finished (or never applied).
+    private func isFlightComplete(for message: ChatMessage) -> Bool {
+        outgoingTransition?.presentation != .messageFlight
+            || outgoingTransition?.id != message.id
+            || completedMessageFlightID == message.id
     }
 
     @ViewBuilder

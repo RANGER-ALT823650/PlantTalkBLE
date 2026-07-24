@@ -1,0 +1,56 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#FF000000"
+    },
+    {
+      "name": "background_primary",
+      "value": "#FF000000"
+    },
+    {
+      "name": "background_secondary",
+      "value": "#FF1C1C1E"
+    },
+    {
+      "name": "surface_translucent",
+      "value": "#E62C2C2E"
+    },
+    {
+      "name": "text_primary",
+      "value": "#FFFFFFFF"
+    },
+    {
+      "name": "text_secondary",
+      "value": "#99FFFFFF"
+    },
+    {
+      "name": "text_tertiary",
+      "value": "#66FFFFFF"
+    },
+    {
+      "name": "separator",
+      "value": "#33FFFFFF"
+    },
+    {
+      "name": "danger",
+      "value": "#FFFF453A"
+    },
+    {
+      "name": "sensor_temperature",
+      "value": "#FFFF9F0A"
+    },
+    {
+      "name": "sensor_humidity",
+      "value": "#FF0A84FF"
+    },
+    {
+      "name": "sensor_soil",
+      "value": "#FFAC8E68"
+    },
+    {
+      "name": "sensor_light",
+      "value": "#FFFFD60A"
+    }
+  ]
+}

@@ -10,6 +10,7 @@
 		0D46B81E925EC66430B5892E /* PlantArtworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */; };
 		11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */; };
 		1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */; };
+		1A0AEBF0BEC1C78AE8EC117D /* CardComponentPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12681C3D96B9FD6F2A3519ED /* CardComponentPreview.swift */; };
 		1AD5193889E6E935D13C3336 /* RealtimeAudioIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7821E086BE2F15BE993E99D2 /* RealtimeAudioIO.swift */; };
 		1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */; };
 		2276E7EBC1FE747D071C6414 /* CameraCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 600BD03E36121532166372D4 /* CameraCaptureView.swift */; };
@@ -22,6 +23,8 @@
 		527F5A12260177CF1C616599 /* OpenAICompatibleClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */; };
 		624FE57C9547F99D53D401F5 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A12282A1F665039788BEE3 /* ContentView.swift */; };
 		728BB87E8B19F0BFF6535A85 /* DayDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */; };
+		733156E5A1342A16C31AFFBF /* AIConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAE2AF585C832E6B1CD932B /* AIConfiguration.swift */; };
+		74B1389D587BEA2038383998 /* PlantImageGenerationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */; };
 		753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */; };
 		76A30422EC98C370886FB859 /* PlantBluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */; };
 		7B5D40C2BEEC751E7288F985 /* RealtimeConversationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */; };
@@ -31,15 +34,18 @@
 		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
 		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
 		98D0641588A37B4F25B02EAF /* OrbTuningLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */; };
+		9DADBE01E160ACA43D3B14B4 /* PlantImageGenerationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */; };
 		A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */; };
 		A98AE3F049FF7DF91F9186D3 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */; };
 		AA45D0AF5CBD31EE42D36021 /* AISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48D7300B5B0307794AED6BE /* AISettingsView.swift */; };
+		ADF696D6FCCB2B94C4652A25 /* ArtworkPreviewLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1387FF12EEB31E6F4CD69D6F /* ArtworkPreviewLabApp.swift */; };
 		B373EA7C0E6646A0AC86D57A /* AnimationDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */; };
 		BC7182B5EDC20C1864582396 /* HistoryTransferProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */; };
 		C73A929F85876992944F91A3 /* PlantArtworkCropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */; };
 		C756635B10D1D60457FCCBEA /* PlantDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */; };
 		D38300DF3DB8C01960656B0D /* QwenRealtimeConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */; };
 		D9359F9D5D564D1A7B3E19B0 /* OpenAICompatibleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */; };
+		D98BD8D503DEE3A1997D0635 /* PlantArtworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */; };
 		DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFB78923A16E617E7CFEE47A /* TextConversationView.swift */; };
 		DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */; };
 		E16609BD95D4F86AA9A009DA /* PlantMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */; };
@@ -63,13 +69,17 @@
 		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
 		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
 		0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabaseTests.swift; sourceTree = "<group>"; };
+		12681C3D96B9FD6F2A3519ED /* CardComponentPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardComponentPreview.swift; sourceTree = "<group>"; };
+		1387FF12EEB31E6F4CD69D6F /* ArtworkPreviewLabApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkPreviewLabApp.swift; sourceTree = "<group>"; };
 		14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocol.swift; sourceTree = "<group>"; };
+		15E95E416B4554DDF84D9B94 /* ArtworkPreviewLab.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = ArtworkPreviewLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantMemory.swift; sourceTree = "<group>"; };
 		1E37A59944E630DEFA67FD93 /* QwenRealtimeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeProtocolTests.swift; sourceTree = "<group>"; };
 		216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTuningLabApp.swift; sourceTree = "<group>"; };
 		230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClientTests.swift; sourceTree = "<group>"; };
 		3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationHistoryView.swift; sourceTree = "<group>"; };
 		477FF261A878ED83CBA00B4F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		4DFFDEF5228443785101D271 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4EEFF091310D4BDE120ECE51 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
 		5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkCropTests.swift; sourceTree = "<group>"; };
 		600BD03E36121532166372D4 /* CameraCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureView.swift; sourceTree = "<group>"; };
@@ -82,6 +92,7 @@
 		8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClient.swift; sourceTree = "<group>"; };
 		8E797336EB08ACECAC15137F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantTalkBLEApp.swift; sourceTree = "<group>"; };
+		A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantImageGenerationClient.swift; sourceTree = "<group>"; };
 		A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeConversation.swift; sourceTree = "<group>"; };
 		AFB78923A16E617E7CFEE47A /* TextConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextConversationView.swift; sourceTree = "<group>"; };
 		B6EC131A2D56E78478954626 /* SensorChartSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorChartSheet.swift; sourceTree = "<group>"; };
@@ -136,6 +147,7 @@
 				BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */,
 				05099F394FC182A10A30211A /* PlantDatabase.swift */,
 				B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */,
+				A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */,
 				1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */,
 				D6237A24CE1893E70859F6D7 /* PlantReading.swift */,
 				917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */,
@@ -163,6 +175,7 @@
 		B4BFB5D068D8933155DFA36B = {
 			isa = PBXGroup;
 			children = (
+				DF592B5329ED8316A9675ABB /* ArtworkPreviewLab */,
 				6B7C4E4734D7A56ED39D1370 /* OrbTuningLab */,
 				30C2000207D7393B0B4C4455 /* PlantTalkBLE */,
 				BD43BFC9697BDEA6A1ACC852 /* PlantTalkBLETests */,
@@ -184,6 +197,16 @@
 			path = PlantTalkBLETests;
 			sourceTree = "<group>";
 		};
+		DF592B5329ED8316A9675ABB /* ArtworkPreviewLab */ = {
+			isa = PBXGroup;
+			children = (
+				1387FF12EEB31E6F4CD69D6F /* ArtworkPreviewLabApp.swift */,
+				12681C3D96B9FD6F2A3519ED /* CardComponentPreview.swift */,
+				4DFFDEF5228443785101D271 /* Info.plist */,
+			);
+			path = ArtworkPreviewLab;
+			sourceTree = "<group>";
+		};
 		DFC320A670A990AF4D6F8F0F /* PreviewAudio */ = {
 			isa = PBXGroup;
 			children = (
@@ -195,6 +218,7 @@
 		E8F0FE74304B88910BEFB73B /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				15E95E416B4554DDF84D9B94 /* ArtworkPreviewLab.app */,
 				F467D1F5ADE95E1A6E0BBCE7 /* OrbTuningLab.app */,
 				6CD374B9F3AEBA75E8397553 /* PlantTalkBLE.app */,
 				BD65044E8B2807768E4A838D /* PlantTalkBLETests.xctest */,
@@ -220,6 +244,23 @@
 			);
 			productName = OrbTuningLab;
 			productReference = F467D1F5ADE95E1A6E0BBCE7 /* OrbTuningLab.app */;
+			productType = "com.apple.product-type.application";
+		};
+		710166D979FE095142C1AB8A /* ArtworkPreviewLab */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 637919C5B4087F13B1976747 /* Build configuration list for PBXNativeTarget "ArtworkPreviewLab" */;
+			buildPhases = (
+				2FE7F3A4E3DD168774977F3B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ArtworkPreviewLab;
+			packageProductDependencies = (
+			);
+			productName = ArtworkPreviewLab;
+			productReference = 15E95E416B4554DDF84D9B94 /* ArtworkPreviewLab.app */;
 			productType = "com.apple.product-type.application";
 		};
 		742B46E52623C1067DF1332E /* PlantTalkBLE */ = {
@@ -273,6 +314,10 @@
 						DevelopmentTeam = ZT3X6444JT;
 						ProvisioningStyle = Automatic;
 					};
+					710166D979FE095142C1AB8A = {
+						DevelopmentTeam = ZT3X6444JT;
+						ProvisioningStyle = Automatic;
+					};
 					742B46E52623C1067DF1332E = {
 						DevelopmentTeam = ZT3X6444JT;
 						ProvisioningStyle = Automatic;
@@ -299,6 +344,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				710166D979FE095142C1AB8A /* ArtworkPreviewLab */,
 				1A9AA6D16DB4D5ED9ABBA4BD /* OrbTuningLab */,
 				742B46E52623C1067DF1332E /* PlantTalkBLE */,
 				E975ED3DDCA379F8E4588018 /* PlantTalkBLETests */,
@@ -341,6 +387,7 @@
 				DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */,
 				753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */,
 				97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */,
+				9DADBE01E160ACA43D3B14B4 /* PlantImageGenerationClient.swift in Sources */,
 				E16609BD95D4F86AA9A009DA /* PlantMemory.swift in Sources */,
 				2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */,
 				EF082AFA2428C2C243A58803 /* PlantTalkBLEApp.swift in Sources */,
@@ -350,6 +397,18 @@
 				1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */,
 				2F526B588BA296AB751A2BBC /* SensorChartSheet.swift in Sources */,
 				DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2FE7F3A4E3DD168774977F3B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				733156E5A1342A16C31AFFBF /* AIConfiguration.swift in Sources */,
+				ADF696D6FCCB2B94C4652A25 /* ArtworkPreviewLabApp.swift in Sources */,
+				1A0AEBF0BEC1C78AE8EC117D /* CardComponentPreview.swift in Sources */,
+				D98BD8D503DEE3A1997D0635 /* PlantArtworkView.swift in Sources */,
+				74B1389D587BEA2038383998 /* PlantImageGenerationClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -386,6 +445,24 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		194D08F8416F5ECF2E5AE6E1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = ArtworkPreviewLab/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ArtworkPreviewLab;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
 		1FE034FE3961B95A66524396 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -402,6 +479,24 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlantTalkBLE.app/PlantTalkBLE";
 			};
 			name = Debug;
+		};
+		6C5B90A5917CA04C34D390F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = ZT3X6444JT;
+				INFOPLIST_FILE = ArtworkPreviewLab/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ArtworkPreviewLab;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
 		};
 		778EE35AC042DC2AABAF9549 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -621,6 +716,15 @@
 			buildConfigurations = (
 				778EE35AC042DC2AABAF9549 /* Debug */,
 				AD9C675FAFE16D57C1F18EC8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		637919C5B4087F13B1976747 /* Build configuration list for PBXNativeTarget "ArtworkPreviewLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				194D08F8416F5ECF2E5AE6E1 /* Debug */,
+				6C5B90A5917CA04C34D390F2 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -1,0 +1,1 @@
+# Keep empty until release hardening. Obfuscation is disabled in build-profile.json5.

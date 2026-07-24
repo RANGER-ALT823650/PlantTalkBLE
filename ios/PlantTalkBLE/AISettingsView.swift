@@ -102,13 +102,19 @@ struct AISettingsView: View {
     @State private var realtimeURL: String
     @State private var realtimeModel: String
     @State private var realtimeVoice: String
+    @State private var imageGenURL: String
+    @State private var imageGenModel: String
+    @State private var imageGenPrompt: String
     @State private var chatAPIKey = ""
     @State private var realtimeAPIKey = ""
+    @State private var imageGenAPIKey = ""
     @State private var hasSavedChatAPIKey: Bool
     @State private var hasSavedRealtimeAPIKey: Bool
+    @State private var hasSavedImageGenAPIKey: Bool
     @State private var hasLegacySharedAPIKey: Bool
     @State private var isChatAPIKeyVisible = false
     @State private var isRealtimeAPIKeyVisible = false
+    @State private var isImageGenAPIKeyVisible = false
     @State private var statusMessage: String?
     @State private var isShowingStatus = false
     @FocusState private var focusedField: SettingsField?
@@ -116,15 +122,19 @@ struct AISettingsView: View {
     private enum SettingsField: Hashable {
         case chatAPIKey
         case realtimeAPIKey
+        case imageGenAPIKey
         case baseURL
         case model
         case realtimeURL
         case realtimeModel
+        case imageGenURL
+        case imageGenModel
     }
 
     private enum APIKeyKind {
         case chat
         case realtime
+        case imageGen
     }
 
     private struct RealtimeVoice: Identifiable {
@@ -198,8 +208,12 @@ struct AISettingsView: View {
         _realtimeURL = State(initialValue: AISettingsStore.realtimeURLString)
         _realtimeModel = State(initialValue: AISettingsStore.realtimeModel)
         _realtimeVoice = State(initialValue: AISettingsStore.realtimeVoice)
+        _imageGenURL = State(initialValue: AISettingsStore.imageGenURLString)
+        _imageGenModel = State(initialValue: AISettingsStore.imageGenModel)
+        _imageGenPrompt = State(initialValue: AISettingsStore.imageGenPrompt)
         _hasSavedChatAPIKey = State(initialValue: AISettingsStore.hasChatAPIKey())
         _hasSavedRealtimeAPIKey = State(initialValue: AISettingsStore.hasRealtimeAPIKey())
+        _hasSavedImageGenAPIKey = State(initialValue: AISettingsStore.hasImageGenAPIKey())
         _hasLegacySharedAPIKey = State(initialValue: AISettingsStore.hasLegacySharedAPIKey())
     }
 
@@ -354,6 +368,73 @@ struct AISettingsView: View {
             }
 
             Section {
+                TextField("https://dashscope.aliyuncs.com/…/generation", text: $imageGenURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focusedField, equals: .imageGenURL)
+
+                TextField("生图模型（如 qwen-image-edit）", text: $imageGenModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focusedField, equals: .imageGenModel)
+
+                HStack {
+                    apiKeyInput(
+                        placeholder: imageGenAPIKeyPlaceholder,
+                        text: $imageGenAPIKey,
+                        isVisible: isImageGenAPIKeyVisible,
+                        focusedField: .imageGenAPIKey
+                    )
+
+                    Button {
+                        isImageGenAPIKeyVisible.toggle()
+                    } label: {
+                        Image(systemName: isImageGenAPIKeyVisible ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(isImageGenAPIKeyVisible ? "隐藏生图 API Key" : "显示生图 API Key")
+                }
+
+                HStack {
+                    Button("保存生图 API Key") {
+                        saveAPIKeyOnly(.imageGen)
+                    }
+                    .disabled(imageGenAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Spacer()
+
+                    Button("从剪贴板粘贴") {
+                        pasteAPIKey(.imageGen)
+                    }
+                }
+                .buttonStyle(.borderless)
+
+                if hasSavedImageGenAPIKey {
+                    Button("清除生图 API Key", role: .destructive) {
+                        clearAPIKey(.imageGen)
+                    }
+                }
+
+                Button("使用千问图像编辑默认配置") {
+                    applyQwenImageGenDefaults()
+                }
+            } header: {
+                Text("AI 生图（千问图像编辑 / 图生图）")
+            } footer: {
+                Text("根据当前植物图片生成新图，走 DashScope multimodal-generation 同步接口。模型可填 qwen-image-edit、qwen-image-edit-plus 等。生图 API Key 留空时会自动复用上方实时语音的 DASHSCOPE_API_KEY。")
+            }
+
+            Section {
+                TextEditor(text: $imageGenPrompt)
+                    .frame(minHeight: 120)
+            } header: {
+                Text("默认生图提示词")
+            } footer: {
+                Text("在植物图片编辑页点“AI 生图”时的默认提示词。可在编辑页右上角展开输入框临时自定义，不会覆盖此默认值。")
+            }
+
+            Section {
                 TextEditor(text: $systemPrompt)
                     .frame(minHeight: 180)
             } header: {
@@ -411,6 +492,10 @@ struct AISettingsView: View {
         hasSavedRealtimeAPIKey ? "已保存；输入新 Key 可覆盖" : "DASHSCOPE_API_KEY / sk-..."
     }
 
+    private var imageGenAPIKeyPlaceholder: String {
+        hasSavedImageGenAPIKey ? "已保存；输入新 Key 可覆盖" : "留空则复用实时语音 Key"
+    }
+
     private func save() {
         let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsedURL = URL(string: trimmedBaseURL),
@@ -440,6 +525,16 @@ struct AISettingsView: View {
             showStatus(AIConfigurationError.missingVoice.localizedDescription)
             return
         }
+        let trimmedImageGenURL = imageGenURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedImageGenURL.isEmpty {
+            guard let parsedImageGenURL = URL(string: trimmedImageGenURL),
+                  let imageGenScheme = parsedImageGenURL.scheme?.lowercased(),
+                  ["http", "https"].contains(imageGenScheme),
+                  parsedImageGenURL.host != nil else {
+                showStatus(AIConfigurationError.invalidImageGenURL.localizedDescription)
+                return
+            }
+        }
 
         do {
             AISettingsStore.savePreferences(
@@ -448,7 +543,12 @@ struct AISettingsView: View {
                 systemPrompt: systemPrompt,
                 realtimeURL: trimmedRealtimeURL,
                 realtimeModel: realtimeModel,
-                realtimeVoice: realtimeVoice
+                realtimeVoice: realtimeVoice,
+                imageGenURL: trimmedImageGenURL.isEmpty
+                    ? AISettingsStore.defaultImageGenURL
+                    : trimmedImageGenURL,
+                imageGenModel: imageGenModel,
+                imageGenPrompt: imageGenPrompt
             )
 
             var savedKeys: [String] = []
@@ -463,6 +563,12 @@ struct AISettingsView: View {
                 realtimeAPIKey = ""
                 hasSavedRealtimeAPIKey = true
                 savedKeys.append("实时语音 API Key")
+            }
+            if !imageGenAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try AISettingsStore.saveImageGenAPIKey(imageGenAPIKey)
+                imageGenAPIKey = ""
+                hasSavedImageGenAPIKey = true
+                savedKeys.append("生图 API Key")
             }
 
             focusedField = nil
@@ -491,6 +597,12 @@ struct AISettingsView: View {
                 hasSavedRealtimeAPIKey = true
                 focusedField = nil
                 showStatus("实时语音 API Key 已保存到本机 Keychain。")
+            case .imageGen:
+                try AISettingsStore.saveImageGenAPIKey(imageGenAPIKey)
+                imageGenAPIKey = ""
+                hasSavedImageGenAPIKey = true
+                focusedField = nil
+                showStatus("生图 API Key 已保存到本机 Keychain。")
             }
         } catch {
             showStatus(error.localizedDescription)
@@ -511,6 +623,9 @@ struct AISettingsView: View {
         case .realtime:
             realtimeAPIKey = pasted
             focusedField = .realtimeAPIKey
+        case .imageGen:
+            imageGenAPIKey = pasted
+            focusedField = .imageGenAPIKey
         }
     }
 
@@ -523,6 +638,11 @@ struct AISettingsView: View {
         realtimeURL = AISettingsStore.defaultRealtimeURL
         realtimeModel = AISettingsStore.defaultRealtimeModel
         realtimeVoice = AISettingsStore.defaultRealtimeVoice
+    }
+
+    private func applyQwenImageGenDefaults() {
+        imageGenURL = AISettingsStore.defaultImageGenURL
+        imageGenModel = "qwen-image-edit"
     }
 
     private func clearAPIKey(_ kind: APIKeyKind) {
@@ -538,6 +658,11 @@ struct AISettingsView: View {
                 realtimeAPIKey = ""
                 hasSavedRealtimeAPIKey = false
                 showStatus("实时语音 API Key 已从本机 Keychain 清除。")
+            case .imageGen:
+                try AISettingsStore.deleteImageGenAPIKey()
+                imageGenAPIKey = ""
+                hasSavedImageGenAPIKey = false
+                showStatus("生图 API Key 已从本机 Keychain 清除。")
             }
         } catch {
             showStatus(error.localizedDescription)

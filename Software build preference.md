@@ -1,6 +1,6 @@
 # Software Build Preference
 
-更新日期：2026-07-22
+更新日期：2026-07-24
 
 ## 第一部分：软件构建偏好
 
@@ -45,6 +45,9 @@
 
 14. **渲染大模型输出的 Markdown**
     聊天气泡展示大模型输出时必须渲染 Markdown，不得将 Markdown 源码作为普通文本直接显示。
+
+15. **Context Menu 预览轮廓适配**  
+    使用 `contextMenu` 时，必要时需通过 `.contentShape(.contextMenuPreview, CustomShape())` 指定贴合控件/插画轮廓的自定义外形，避免长按触发系统预览时出现不美观的闪烁或跳动。
 
 ## 第二部分：对应实现
 

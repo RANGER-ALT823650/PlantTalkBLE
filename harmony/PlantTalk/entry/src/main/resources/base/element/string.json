@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Plant Talk HarmonyOS client"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Talk with your plant"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Plant Talk"
+    },
+    {
+      "name": "bluetooth_reason",
+      "value": "用于连接 Plant Sensor 并同步植物环境数据"
+    }
+  ]
+}

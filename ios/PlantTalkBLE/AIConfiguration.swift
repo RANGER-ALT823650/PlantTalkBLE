@@ -16,6 +16,12 @@ struct QwenRealtimeConfiguration: Equatable, Sendable {
     let apiKey: String
 }
 
+struct ImageGenerationConfiguration: Equatable, Sendable {
+    let baseURL: URL
+    let model: String
+    let apiKey: String
+}
+
 enum AIConfigurationError: LocalizedError {
     case invalidBaseURL
     case invalidRealtimeURL
@@ -24,6 +30,9 @@ enum AIConfigurationError: LocalizedError {
     case missingVoice
     case missingChatAPIKey
     case missingRealtimeAPIKey
+    case invalidImageGenURL
+    case missingImageGenModel
+    case missingImageGenAPIKey
     case keychain(OSStatus)
 
     var errorDescription: String? {
@@ -42,6 +51,12 @@ enum AIConfigurationError: LocalizedError {
             "请先在设置中保存文本分析 API Key。"
         case .missingRealtimeAPIKey:
             "请先在设置中保存实时语音 API Key。"
+        case .invalidImageGenURL:
+            "AI 生图地址无效，请填写包含 http:// 或 https:// 的地址。"
+        case .missingImageGenModel:
+            "请在设置中填写 AI 生图模型名称（如 qwen-image-edit）。"
+        case .missingImageGenAPIKey:
+            "请先在设置中保存 AI 生图或实时语音 API Key。"
         case .keychain(let status):
             "无法访问 Keychain：\(SecCopyErrorMessageString(status, nil) as String? ?? String(status))"
         }
@@ -54,6 +69,13 @@ enum AISettingsStore {
     static let defaultRealtimeURL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     static let defaultRealtimeModel = "qwen3.5-omni-flash-realtime"
     static let defaultRealtimeVoice = "Tina"
+    static let defaultImageGenURL =
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    static let defaultImageGenModel = ""
+    static let defaultImageGenPrompt = """
+        参考这张植物照片，生成一张同一株植物的精致艺术插画：\
+        保留植物本身的形态与主要特征，背景干净柔和，光线通透自然，整体清新治愈。
+        """
     static let defaultSystemPrompt = """
         你是一株通过传感器感知周围环境的植物。请使用第一人称、自然且简洁地与照料者交流。\
         你可以根据温度、空气湿度、土壤湿度 ADC 原始值和光照数据分析当前状态，但不要把未经校准的 ADC 原始值当成准确百分比。\
@@ -66,10 +88,14 @@ enum AISettingsStore {
     private static let realtimeURLKey = "ai.realtimeURL"
     private static let realtimeModelKey = "ai.realtimeModel"
     private static let realtimeVoiceKey = "ai.realtimeVoice"
+    private static let imageGenURLKey = "ai.imageGenURL"
+    private static let imageGenModelKey = "ai.imageGenModel"
+    private static let imageGenPromptKey = "ai.imageGenPrompt"
     private static let keychainService = "com.example.PlantTalkBLE.ai"
     private static let legacySharedKeychainAccount = "openai-compatible-api-key"
     private static let chatKeychainAccount = "openai-compatible-chat-api-key"
     private static let realtimeKeychainAccount = "qwen-realtime-api-key"
+    private static let imageGenKeychainAccount = "qwen-image-generation-api-key"
 
     static var baseURLString: String {
         UserDefaults.standard.string(forKey: baseURLKey) ?? defaultBaseURL
@@ -95,13 +121,28 @@ enum AISettingsStore {
         UserDefaults.standard.string(forKey: realtimeVoiceKey) ?? defaultRealtimeVoice
     }
 
+    static var imageGenURLString: String {
+        UserDefaults.standard.string(forKey: imageGenURLKey) ?? defaultImageGenURL
+    }
+
+    static var imageGenModel: String {
+        UserDefaults.standard.string(forKey: imageGenModelKey) ?? defaultImageGenModel
+    }
+
+    static var imageGenPrompt: String {
+        UserDefaults.standard.string(forKey: imageGenPromptKey) ?? defaultImageGenPrompt
+    }
+
     static func savePreferences(
         baseURL: String,
         model: String,
         systemPrompt: String,
         realtimeURL: String,
         realtimeModel: String,
-        realtimeVoice: String
+        realtimeVoice: String,
+        imageGenURL: String,
+        imageGenModel: String,
+        imageGenPrompt: String
     ) {
         UserDefaults.standard.set(baseURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: baseURLKey)
         UserDefaults.standard.set(model.trimmingCharacters(in: .whitespacesAndNewlines), forKey: modelKey)
@@ -109,6 +150,9 @@ enum AISettingsStore {
         UserDefaults.standard.set(realtimeURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: realtimeURLKey)
         UserDefaults.standard.set(realtimeModel.trimmingCharacters(in: .whitespacesAndNewlines), forKey: realtimeModelKey)
         UserDefaults.standard.set(realtimeVoice.trimmingCharacters(in: .whitespacesAndNewlines), forKey: realtimeVoiceKey)
+        UserDefaults.standard.set(imageGenURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: imageGenURLKey)
+        UserDefaults.standard.set(imageGenModel.trimmingCharacters(in: .whitespacesAndNewlines), forKey: imageGenModelKey)
+        UserDefaults.standard.set(imageGenPrompt, forKey: imageGenPromptKey)
     }
 
     static func configuration() throws -> AIConfiguration {
@@ -167,6 +211,38 @@ enum AISettingsStore {
         )
     }
 
+    /// The image-generation request goes over DashScope's HTTP endpoint using the
+    /// Bailian DASHSCOPE_API_KEY. A dedicated key is used when present; otherwise it
+    /// falls back to the realtime key so users need not re-enter the same key.
+    static func imageGenConfiguration() throws -> ImageGenerationConfiguration {
+        let urlText = imageGenURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = URL(string: urlText),
+              let scheme = baseURL.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              baseURL.host != nil else {
+            throw AIConfigurationError.invalidImageGenURL
+        }
+
+        let modelName = imageGenModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelName.isEmpty else {
+            throw AIConfigurationError.missingImageGenModel
+        }
+
+        let dedicatedKey = (try? readImageGenAPIKey()) ?? nil
+        let fallbackKey = (try? readRealtimeAPIKey()) ?? nil
+        guard let apiKey = [dedicatedKey, fallbackKey]
+            .compactMap({ $0 })
+            .first(where: { !$0.isEmpty }) else {
+            throw AIConfigurationError.missingImageGenAPIKey
+        }
+
+        return ImageGenerationConfiguration(
+            baseURL: baseURL,
+            model: modelName,
+            apiKey: apiKey
+        )
+    }
+
     static func hasChatAPIKey() -> Bool {
         guard let apiKey = try? readChatAPIKey() else { return false }
         return !apiKey.isEmpty
@@ -174,6 +250,11 @@ enum AISettingsStore {
 
     static func hasRealtimeAPIKey() -> Bool {
         guard let apiKey = try? readRealtimeAPIKey() else { return false }
+        return !apiKey.isEmpty
+    }
+
+    static func hasImageGenAPIKey() -> Bool {
+        guard let apiKey = try? readImageGenAPIKey() else { return false }
         return !apiKey.isEmpty
     }
 
@@ -190,12 +271,20 @@ enum AISettingsStore {
         try saveAPIKey(apiKey, account: realtimeKeychainAccount)
     }
 
+    static func saveImageGenAPIKey(_ apiKey: String) throws {
+        try saveAPIKey(apiKey, account: imageGenKeychainAccount)
+    }
+
     static func deleteChatAPIKey() throws {
         try deleteAPIKey(account: chatKeychainAccount)
     }
 
     static func deleteRealtimeAPIKey() throws {
         try deleteAPIKey(account: realtimeKeychainAccount)
+    }
+
+    static func deleteImageGenAPIKey() throws {
+        try deleteAPIKey(account: imageGenKeychainAccount)
     }
 
     static func deleteLegacySharedAPIKey() throws {
@@ -208,6 +297,10 @@ enum AISettingsStore {
 
     private static func readRealtimeAPIKey() throws -> String? {
         try readAPIKey(account: realtimeKeychainAccount)
+    }
+
+    private static func readImageGenAPIKey() throws -> String? {
+        try readAPIKey(account: imageGenKeychainAccount)
     }
 
     private static func saveAPIKey(_ apiKey: String, account: String) throws {

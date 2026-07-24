@@ -12,6 +12,27 @@ packages:
     url: https://github.com/groue/GRDB.swift.git
     from: 7.10.0
 targets:
+  ArtworkPreviewLab:
+    type: application
+    platform: iOS
+    sources:
+      - ArtworkPreviewLab
+      - path: PlantTalkBLE/PlantArtworkView.swift
+      - path: PlantTalkBLE/AIConfiguration.swift
+      - path: PlantTalkBLE/PlantImageGenerationClient.swift
+    info:
+      path: ArtworkPreviewLab/Info.plist
+      properties:
+        CFBundleDisplayName: 植物图片预览台
+        NSCameraUsageDescription: 预览台演示拍摄植物图片。
+        NSPhotoLibraryUsageDescription: 预览台演示从相册选择植物图片。
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ArtworkPreviewLab
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ZT3X6444JT
   OrbTuningLab:
     type: application
     platform: iOS

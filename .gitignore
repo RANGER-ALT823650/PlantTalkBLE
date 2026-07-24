@@ -2,6 +2,7 @@
 .build/
 build/
 .playwright-mcp/
+.playwright-cli/
 tmp/
 web/
 

@@ -8,9 +8,230 @@ struct PlantArtwork {
     let normalizedOffset: CGSize
 }
 
+// MARK: - Generation mask
+
+/// A single static dot in the generation mask. Every dot shares one color and
+/// base radius; only its grid position is stored. The per-frame brush radius
+/// boost is recomputed from the traveling center each frame.
+private struct MaskDot {
+    let position: CGPoint
+}
+
+/// The gray dot-field overlay shown on the plant card while an AI image is being
+/// generated. A single "brush" center travels along `x = sin(t)`, `y = cos(t)`;
+/// the dot nearest the center is enlarged, and dots within the brush circle grow
+/// from the edge inward, so the field reads as a brush sweeping over the card.
+private struct PlantArtworkGenerationMask: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GeometryReader { proxy in
+            DotBrushField(size: proxy.size, reduceMotion: reduceMotion)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement()
+        .accessibilityLabel("正在生成 AI 图片")
+    }
+}
+
+private struct DotBrushField: View {
+    let size: CGSize
+    let reduceMotion: Bool
+
+    // A fixed, axis-aligned, very dense grid of uniform dots (single color, so
+    // they only stand apart from the mask behind them). Positions never move.
+    // Around the traveling center, radii swell from the normal size at the brush
+    // edge up to the center dot, which is the largest.
+    private static let spacing: CGFloat = 5
+    private static let dotRadius: CGFloat = 1.7
+    private static let centerDotRadius: CGFloat = 4.5
+    private static let brushRadiusRatio: CGFloat = 0.24
+    private static let dotColor = Color(white: 0.7)
+    private static let maskColor = Color(white: 0.3)
+
+    var body: some View {
+        let dots = Self.makeDots(in: size)
+
+        ZStack {
+            // Fully opaque wash: the card image is hidden until generation ends.
+            Self.maskColor
+
+            if reduceMotion {
+                // Static field with the center dot fixed at the middle.
+                Canvas { context, canvasSize in
+                    Self.draw(
+                        dots: dots,
+                        center: CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2),
+                        in: context
+                    )
+                }
+            } else {
+                TimelineView(.animation) { timeline in
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    Canvas { context, canvasSize in
+                        Self.draw(
+                            dots: dots,
+                            center: Self.travelingPoint(at: t, in: canvasSize),
+                            in: context
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// The traveling point that anchors the brush. Time is the free variable; X
+    /// follows sine and Y follows cosine at slightly different rates, so the swell
+    /// sweeps across the fixed grid.
+    private static func travelingPoint(at time: TimeInterval, in size: CGSize) -> CGPoint {
+        let marginX = size.width * 0.18
+        let marginY = size.height * 0.18
+        let x = size.width / 2 + sin(time * 0.9) * (size.width / 2 - marginX)
+        let y = size.height / 2 + cos(time * 1.3) * (size.height / 2 - marginY)
+        return CGPoint(x: x, y: y)
+    }
+
+    /// Every dot shares one color. The single grid dot nearest the traveling point
+    /// is the largest; within the brush radius, dot radius falls off from the
+    /// center outward, reaching the normal radius at the brush edge.
+    private static func draw(
+        dots: [MaskDot],
+        center: CGPoint,
+        in context: GraphicsContext
+    ) {
+        // Snap the brush center to its nearest grid dot so that dot peaks exactly.
+        var nearestIndex = 0
+        var nearestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, dot) in dots.enumerated() {
+            let distance = hypot(dot.position.x - center.x, dot.position.y - center.y)
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestIndex = index
+            }
+        }
+        guard !dots.isEmpty else { return }
+        let anchor = dots[nearestIndex].position
+        let brushRadius = max(spacing * 2, min(context.clipBoundingRect.width, context.clipBoundingRect.height) * brushRadiusRatio)
+
+        for dot in dots {
+            let distance = hypot(dot.position.x - anchor.x, dot.position.y - anchor.y)
+            var radius = dotRadius
+            if distance < brushRadius {
+                // Linear falloff: centerDotRadius at the anchor → dotRadius at edge.
+                let falloff = 1 - distance / brushRadius
+                radius = dotRadius + (centerDotRadius - dotRadius) * falloff
+            }
+            let rect = CGRect(
+                x: dot.position.x - radius,
+                y: dot.position.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            )
+            context.fill(Path(ellipseIn: rect), with: .color(dotColor))
+        }
+    }
+
+    /// A fixed, centered, strictly axis-aligned grid — no jitter, so rows and
+    /// columns line up. Dense spacing with a small radius keeps clear gaps.
+    private static func makeDots(in size: CGSize) -> [MaskDot] {
+        guard size.width > 0, size.height > 0 else { return [] }
+        let columns = max(1, Int(size.width / spacing))
+        let rows = max(1, Int(size.height / spacing))
+        let startX = (size.width - CGFloat(columns - 1) * spacing) / 2
+        let startY = (size.height - CGFloat(rows - 1) * spacing) / 2
+
+        var dots: [MaskDot] = []
+        dots.reserveCapacity(columns * rows)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                dots.append(MaskDot(position: CGPoint(
+                    x: startX + CGFloat(column) * spacing,
+                    y: startY + CGFloat(row) * spacing
+                )))
+            }
+        }
+        return dots
+    }
+}
+
+/// Standalone harness for the generation mask. It cycles image → mask → image
+/// on a loop so the appear/disappear animation and the traveling center dot can
+/// be inspected in isolation. Split into small subviews to keep each expression
+/// cheap for the Preview compiler.
+struct GenerationMaskPreview: View {
+    @State private var isGenerating = false
+
+    private let frameWidth: CGFloat = 260
+
+    var body: some View {
+        VStack(spacing: 24) {
+            card
+            toggle
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private var card: some View {
+        placeholderImage
+            .frame(width: frameWidth, height: frameWidth * 4 / 3)
+            .overlay {
+                if isGenerating {
+                    PlantArtworkGenerationMask()
+                        .transition(maskTransition)
+                }
+            }
+            .clipShape(PlantArtworkFrameShape())
+            .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+    }
+
+    private var placeholderImage: some View {
+        LinearGradient(
+            colors: [.green.opacity(0.55), .mint, .teal],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay {
+            Image(systemName: "leaf.fill")
+                .font(.system(size: 88))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private var toggle: some View {
+        Button {
+            withAnimation(.smooth(duration: 0.45)) {
+                isGenerating.toggle()
+            }
+        } label: {
+            Text(isGenerating ? "显示图片" : "显示蒙版")
+                .font(.headline)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+
+    private var maskTransition: AnyTransition {
+        .opacity.combined(with: .scale(scale: 0.92))
+    }
+}
+
+#Preview("生图蒙版动画") {
+    GenerationMaskPreview()
+}
+
 struct PlantArtworkDraft: Identifiable {
     let id = UUID()
     let artwork: PlantArtwork
+}
+
+/// The payload the editor hands back when the user taps "AI 生图": the source
+/// image plus the crop transform to reapply to whatever image comes back.
+struct PlantArtworkGenerationRequest {
+    let image: UIImage
+    let prompt: String
+    let scale: CGFloat
+    let normalizedOffset: CGSize
 }
 
 enum PlantArtworkCrop {
@@ -153,12 +374,18 @@ struct PlantArtworkControl: View {
     @Binding var artwork: PlantArtwork?
     let isDetailsExpanded: Bool
     let onTap: () -> Void
+    var imageGenerationClient: PlantImageGenerationClient = .live()
 
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var editorDraft: PlantArtworkDraft?
     @State private var isPhotoPickerPresented = false
+    @State private var isCameraPresented = false
     @State private var isLoadingImage = false
     @State private var pickerError: PlantArtworkPickerError?
+    @State private var isGeneratingImage = false
+    @State private var generationTask: Task<Void, Never>?
+    @State private var generationError: PlantArtworkPickerError?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         artworkSurface
@@ -171,10 +398,22 @@ struct PlantArtworkControl: View {
                 guard let selectedPhotoItem else { return }
                 await loadImage(from: selectedPhotoItem)
             }
+            .fullScreenCover(isPresented: $isCameraPresented) {
+                SystemCameraPicker { image in
+                    isCameraPresented = false
+                    guard let image else { return }
+                    editorDraft = PlantArtworkDraft(
+                        artwork: PlantArtwork(image: image, scale: 1, normalizedOffset: .zero)
+                    )
+                }
+                .ignoresSafeArea()
+            }
             .sheet(item: $editorDraft) { draft in
                 PlantArtworkEditorView(
                     draft: draft,
-                    artwork: $artwork
+                    artwork: $artwork,
+                    defaultPrompt: AISettingsStore.imageGenPrompt,
+                    onGenerate: startGeneration
                 )
             }
             .alert(item: $pickerError) { error in
@@ -183,6 +422,16 @@ struct PlantArtworkControl: View {
                     message: Text(error.message),
                     dismissButton: .default(Text("好"))
                 )
+            }
+            .alert(item: $generationError) { error in
+                Alert(
+                    title: Text("AI 生图失败"),
+                    message: Text(error.message),
+                    dismissButton: .default(Text("好"))
+                )
+            }
+            .onDisappear {
+                generationTask?.cancel()
             }
     }
 
@@ -194,12 +443,20 @@ struct PlantArtworkControl: View {
                         ArtworkLoadingIndicator()
                     }
                 }
+                .overlay {
+                    if isGeneratingImage {
+                        PlantArtworkGenerationMask()
+                            .clipShape(PlantArtworkFrameShape())
+                            .transition(generationMaskTransition)
+                    }
+                }
         }
         .buttonStyle(.plain)
+        .disabled(isGeneratingImage)
         .contentShape(.interaction, Rectangle())
         .contentShape(.contextMenuPreview, PlantArtworkFrameShape())
         .contextMenu {
-            if !isDetailsExpanded {
+            if !isDetailsExpanded && !isGeneratingImage {
                 artworkMenu
             }
         }
@@ -218,8 +475,22 @@ struct PlantArtworkControl: View {
         }
     }
 
+    private var generationMaskTransition: AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        return .opacity.combined(with: .scale(scale: 0.92))
+    }
+
     @ViewBuilder
     private var artworkMenu: some View {
+        Button {
+            capturePhoto()
+        } label: {
+            Label("拍摄图片", systemImage: "camera")
+        }
+        .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
+
         Button {
             choosePhoto()
         } label: {
@@ -247,6 +518,55 @@ struct PlantArtworkControl: View {
     private func choosePhoto() {
         selectedPhotoItem = nil
         isPhotoPickerPresented = true
+    }
+
+    private func capturePhoto() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else { return }
+        isCameraPresented = true
+    }
+
+    /// Called from the editor's "AI 生图" button. The editor dismisses itself, so
+    /// this runs against the home card: the mask blooms in immediately, then the
+    /// request runs and swaps in the generated image (keeping the crop transform).
+    private func startGeneration(_ request: PlantArtworkGenerationRequest) {
+        generationTask?.cancel()
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.45)) {
+            isGeneratingImage = true
+        }
+
+        generationTask = Task {
+            do {
+                let configuration = try AISettingsStore.imageGenConfiguration()
+                let generated = try await imageGenerationClient.generate(
+                    configuration,
+                    request.image,
+                    request.prompt
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    artwork = PlantArtwork(
+                        image: generated,
+                        scale: request.scale,
+                        normalizedOffset: request.normalizedOffset
+                    )
+                    finishGeneration()
+                }
+            } catch is CancellationError {
+                await MainActor.run { finishGeneration() }
+            } catch {
+                await MainActor.run {
+                    finishGeneration()
+                    generationError = PlantArtworkPickerError(message: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func finishGeneration() {
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.45)) {
+            isGeneratingImage = false
+        }
+        generationTask = nil
     }
 
     @MainActor
@@ -327,7 +647,7 @@ private struct ArtworkLoadingIndicator: View {
     }
 }
 
-private struct PlantArtworkPlaceholder: View {
+struct PlantArtworkPlaceholder: View {
     let artwork: PlantArtwork?
 
     var body: some View {
@@ -381,17 +701,29 @@ private struct PlantArtworkPlaceholder: View {
 private struct PlantArtworkEditorView: View {
     let draft: PlantArtworkDraft
     @Binding var artwork: PlantArtwork?
+    let defaultPrompt: String
+    let onGenerate: (PlantArtworkGenerationRequest) -> Void
 
     @State private var scale: CGFloat
     @State private var normalizedOffset: CGSize
+    @State private var isPromptExpanded = false
+    @State private var customPrompt = ""
     @GestureState private var gestureScale: CGFloat = 1
     @GestureState private var dragTranslation: CGSize = .zero
+    @FocusState private var isPromptFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(draft: PlantArtworkDraft, artwork: Binding<PlantArtwork?>) {
+    init(
+        draft: PlantArtworkDraft,
+        artwork: Binding<PlantArtwork?>,
+        defaultPrompt: String,
+        onGenerate: @escaping (PlantArtworkGenerationRequest) -> Void
+    ) {
         self.draft = draft
         _artwork = artwork
+        self.defaultPrompt = defaultPrompt
+        self.onGenerate = onGenerate
         _scale = State(initialValue: PlantArtworkCrop.clampedScale(draft.artwork.scale))
         _normalizedOffset = State(initialValue: draft.artwork.normalizedOffset)
     }
@@ -402,24 +734,7 @@ private struct PlantArtworkEditorView: View {
                 let frameWidth = cropFrameWidth(in: proxy.size)
                 let frameSize = CGSize(width: frameWidth, height: frameWidth * 4 / 3)
 
-                VStack(spacing: 18) {
-                    Spacer(minLength: 12)
-
-                    cropFrame(size: frameSize)
-
-                    adjustmentHint
-
-                    Button(action: resetTransform) {
-                        Label("还原位置", systemImage: "arrow.counterclockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .disabled(isAtDefaultTransform)
-
-                    Spacer(minLength: 12)
-                }
-                .padding(.horizontal, 20)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                editorContent(frameSize: frameSize, frameWidth: frameWidth)
             }
             .background(Color(uiColor: .systemBackground))
             .navigationTitle("调整植物图片")
@@ -445,6 +760,42 @@ private struct PlantArtworkEditorView: View {
         .interactiveDismissDisabled(hasUnsavedTransformChanges)
     }
 
+    private func editorContent(frameSize: CGSize, frameWidth: CGFloat) -> some View {
+        VStack(spacing: 18) {
+            Spacer(minLength: 12)
+
+            cropFrameWithControls(size: frameSize, frameWidth: frameWidth)
+
+            adjustmentHint
+
+            Spacer(minLength: 12)
+        }
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isPromptExpanded {
+                collapsePrompt()
+            }
+        }
+    }
+
+    private func cropFrameWithControls(size: CGSize, frameWidth: CGFloat) -> some View {
+        cropFrame(size: size)
+            .overlay(alignment: .topTrailing) {
+                promptControl(frameWidth: frameWidth)
+                    .padding(12)
+            }
+            .overlay(alignment: .bottomLeading) {
+                resetButton
+                    .padding(12)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                generateButton
+                    .padding(12)
+            }
+    }
+
     private func cropFrame(size: CGSize) -> some View {
         let effectiveScale = PlantArtworkCrop.clampedScale(scale * gestureScale)
         let baseOffset = PlantArtworkCrop.pointOffset(
@@ -464,7 +815,7 @@ private struct PlantArtworkEditorView: View {
         let cornerRadius = size.width * 0.14
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
-        return Image(uiImage: draft.artwork.image)
+        let imageContent = Image(uiImage: draft.artwork.image)
             .resizable()
             .scaledToFill()
             .frame(width: size.width, height: size.height)
@@ -472,12 +823,14 @@ private struct PlantArtworkEditorView: View {
             .offset(effectiveOffset)
             .frame(width: size.width, height: size.height)
             .contentShape(Rectangle())
+
+        return imageContent
             .gesture(dragGesture(frameSize: size))
             .simultaneousGesture(magnifyGesture(frameSize: size))
             .clipShape(shape)
-            .overlay {
+            .overlay(
                 shape.strokeBorder(Color.accentColor.opacity(0.65), lineWidth: 2)
-            }
+            )
             .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
             .accessibilityLabel("植物图片画框")
             .accessibilityHint("双指缩放图片，拖动来调整画面位置")
@@ -485,17 +838,141 @@ private struct PlantArtworkEditorView: View {
 
     @ViewBuilder
     private var adjustmentHint: some View {
-        let label = Label("双指缩放 · 拖动定位", systemImage: "hand.pinch")
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 9)
-
         if #available(iOS 26, *) {
-            label.glassEffect(.regular, in: .capsule)
+            Label("双指缩放 · 拖动定位", systemImage: "hand.pinch")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .glassEffect(.regular, in: .capsule)
         } else {
-            label.background(.ultraThinMaterial, in: Capsule())
+            Label("双指缩放 · 拖动定位", systemImage: "hand.pinch")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(.ultraThinMaterial, in: Capsule())
         }
+    }
+
+    private var resetButton: some View {
+        glassCircleButton(systemName: "arrow.counterclockwise", action: resetTransform)
+            .disabled(isAtDefaultTransform)
+            .opacity(isAtDefaultTransform ? 0.5 : 1)
+            .accessibilityLabel("还原位置")
+    }
+
+    private var generateButton: some View {
+        glassCircleButton(systemName: "sparkles", tint: .accentColor, action: startGeneration)
+            .accessibilityLabel("AI 生图")
+            .accessibilityHint("根据当前图片和提示词生成新的植物图片")
+    }
+
+    @ViewBuilder
+    private func promptControl(frameWidth: CGFloat) -> some View {
+        if isPromptExpanded {
+            promptEditor(maxWidth: frameWidth - 24)
+        } else {
+            glassCircleButton(systemName: "text.bubble", action: expandPrompt)
+                .accessibilityLabel("自定义生图提示词")
+        }
+    }
+
+    @ViewBuilder
+    private func promptEditor(maxWidth: CGFloat) -> some View {
+        Group {
+            if #available(iOS 26, *) {
+                promptInputField(maxWidth: maxWidth)
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+            } else {
+                promptInputField(maxWidth: maxWidth)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+        }
+        .transition(.scale(scale: 0.7, anchor: .topTrailing).combined(with: .opacity))
+    }
+
+    private func promptInputField(maxWidth: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            TextField(
+                "自定义生图提示词",
+                text: $customPrompt,
+                prompt: Text(defaultPrompt),
+                axis: .vertical
+            )
+            .lineLimit(1...4)
+            .font(.subheadline)
+            .focused($isPromptFocused)
+            .submitLabel(.done)
+            .onSubmit(collapsePrompt)
+
+            Button(action: collapsePrompt) {
+                Image(systemName: "checkmark")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+            .accessibilityLabel("完成输入")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func glassCircleButton(
+        systemName: String,
+        tint: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        if #available(iOS 26, *) {
+            Button(action: action) {
+                Image(systemName: systemName)
+                    .font(.headline)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.regular)
+            .tint(tint)
+        } else {
+            Button(action: action) {
+                Image(systemName: systemName)
+                    .font(.headline)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(tint ?? .primary)
+            .background(.ultraThinMaterial, in: Circle())
+        }
+    }
+
+    private func expandPrompt() {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.28, extraBounce: 0.1)) {
+            isPromptExpanded = true
+        }
+        isPromptFocused = true
+    }
+
+    private func collapsePrompt() {
+        isPromptFocused = false
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.28, extraBounce: 0.1)) {
+            isPromptExpanded = false
+        }
+    }
+
+    /// Resolve the prompt, hand the source image and current crop transform back
+    /// to the control, then dismiss so the mask animation runs on the home card.
+    private func startGeneration() {
+        let trimmed = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = trimmed.isEmpty ? defaultPrompt : trimmed
+        onGenerate(PlantArtworkGenerationRequest(
+            image: draft.artwork.image,
+            prompt: prompt,
+            scale: PlantArtworkCrop.clampedScale(scale),
+            normalizedOffset: normalizedOffset
+        ))
+        dismiss()
     }
 
     private var isAtDefaultTransform: Bool {
@@ -588,23 +1065,93 @@ private struct PlantArtworkEditorView: View {
     }
 }
 
-private struct PlantArtworkEditorPreview: View {
+struct PlantArtworkEditorPreview: View {
     @State private var artwork: PlantArtwork?
+
+    private static var sampleImage: UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 800))
+        return renderer.image { context in
+            let cgContext = context.cgContext
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors = [
+                UIColor.systemGreen.withAlphaComponent(0.8).cgColor,
+                UIColor.systemTeal.withAlphaComponent(0.9).cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0, 1]) {
+                cgContext.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: 0, y: 0),
+                    end: CGPoint(x: 600, y: 800),
+                    options: []
+                )
+            }
+            if let symbol = UIImage(systemName: "leaf.fill")?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+                symbol.draw(in: CGRect(x: 200, y: 300, width: 200, height: 200))
+            }
+        }
+    }
 
     var body: some View {
         PlantArtworkEditorView(
             draft: PlantArtworkDraft(
                 artwork: PlantArtwork(
-                    image: UIImage(systemName: "leaf.fill")!,
+                    image: Self.sampleImage,
                     scale: 1,
                     normalizedOffset: .zero
                 )
             ),
-            artwork: $artwork
+            artwork: $artwork,
+            defaultPrompt: AISettingsStore.defaultImageGenPrompt,
+            onGenerate: { _ in }
         )
+    }
+}
+
+/// A thin wrapper over the system camera. Presenting this directly opens the
+/// native camera UI, matching "拍摄图片" launching straight into the camera.
+struct SystemCameraPicker: UIViewControllerRepresentable {
+    let onImage: (UIImage?) -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onImage: onImage)
+    }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate,
+        UINavigationControllerDelegate {
+        private let onImage: (UIImage?) -> Void
+
+        init(onImage: @escaping (UIImage?) -> Void) {
+            self.onImage = onImage
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            onImage(info[.originalImage] as? UIImage)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onImage(nil)
+        }
     }
 }
 
 #Preview("植物图片编辑") {
     PlantArtworkEditorPreview()
+}
+
+#Preview("植物卡片组件") {
+    PlantArtworkPlaceholder(artwork: nil)
+        .frame(width: 220)
+        .padding(40)
 }
