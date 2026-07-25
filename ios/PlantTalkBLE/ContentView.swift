@@ -314,7 +314,8 @@ struct ContentView: View {
                             onContinueRealtimeConversation: continueRealtimeConversation,
                             onDetailPresentationChanged: { isPresented in
                                 isHistoryDetailPresented = isPresented
-                            }
+                            },
+                            onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard
                         )
                             .background(Color(uiColor: .systemBackground))
                             .toolbar {
@@ -487,6 +488,14 @@ struct ContentView: View {
 
     private var historyOverviewTransition: AnyTransition {
         reduceMotion ? .opacity : .move(edge: .leading)
+    }
+
+    private func applyGeneratedImageToPlantCard(_ image: UIImage) {
+        plantArtworkBinding.wrappedValue = PlantArtwork(
+            image: image,
+            scale: 1,
+            normalizedOffset: .zero
+        )
     }
 
     private var plantArtworkBinding: Binding<PlantArtwork?> {

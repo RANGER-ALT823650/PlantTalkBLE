@@ -34,11 +34,13 @@
 		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
 		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
 		98D0641588A37B4F25B02EAF /* OrbTuningLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */; };
+		9CF131CC932C90E8C1780D6D /* ZoomableImagePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56453E86C81122FE81CB1E1 /* ZoomableImagePreview.swift */; };
 		9DADBE01E160ACA43D3B14B4 /* PlantImageGenerationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */; };
 		A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */; };
 		A98AE3F049FF7DF91F9186D3 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCE2AED511A4E9E183BCB8DC /* ChatModels.swift */; };
 		AA45D0AF5CBD31EE42D36021 /* AISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48D7300B5B0307794AED6BE /* AISettingsView.swift */; };
 		ADF696D6FCCB2B94C4652A25 /* ArtworkPreviewLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1387FF12EEB31E6F4CD69D6F /* ArtworkPreviewLabApp.swift */; };
+		B114BD3E7F50BE1E2FE90A96 /* GeneratedImageGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5507E7DD4AACB8E9204DA39 /* GeneratedImageGalleryView.swift */; };
 		B373EA7C0E6646A0AC86D57A /* AnimationDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B7D16FBBD49C18FEBB9AF4 /* AnimationDemoView.swift */; };
 		B47919B4A2282871167E8746 /* CameraCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 600BD03E36121532166372D4 /* CameraCaptureView.swift */; };
 		BC7182B5EDC20C1864582396 /* HistoryTransferProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */; };
@@ -97,6 +99,7 @@
 		A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantImageGenerationClient.swift; sourceTree = "<group>"; };
 		A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeConversation.swift; sourceTree = "<group>"; };
 		AFB78923A16E617E7CFEE47A /* TextConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextConversationView.swift; sourceTree = "<group>"; };
+		B56453E86C81122FE81CB1E1 /* ZoomableImagePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomableImagePreview.swift; sourceTree = "<group>"; };
 		B6EC131A2D56E78478954626 /* SensorChartSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorChartSheet.swift; sourceTree = "<group>"; };
 		B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDataTools.swift; sourceTree = "<group>"; };
 		BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListView.swift; sourceTree = "<group>"; };
@@ -106,6 +109,7 @@
 		BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantConversationBindingTests.swift; sourceTree = "<group>"; };
 		C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryOverviewView.swift; sourceTree = "<group>"; };
 		C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "gpt-live-image-interaction.wav"; sourceTree = "<group>"; };
+		D5507E7DD4AACB8E9204DA39 /* GeneratedImageGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedImageGalleryView.swift; sourceTree = "<group>"; };
 		D6237A24CE1893E70859F6D7 /* PlantReading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantReading.swift; sourceTree = "<group>"; };
 		DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryTransferProtocolTests.swift; sourceTree = "<group>"; };
 		F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DayDetailView.swift; sourceTree = "<group>"; };
@@ -140,6 +144,7 @@
 				BAB6EA8A742C4B6C2891AC60 /* ConversationListView.swift */,
 				F15E9F36A9DE53EDA4891E3C /* DayDetailView.swift */,
 				4EEFF091310D4BDE120ECE51 /* DetailView.swift */,
+				D5507E7DD4AACB8E9204DA39 /* GeneratedImageGalleryView.swift */,
 				C4DBDA76D42E9918704E8269 /* HistoryOverviewView.swift */,
 				14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */,
 				8E797336EB08ACECAC15137F /* Info.plist */,
@@ -160,6 +165,7 @@
 				B6EC131A2D56E78478954626 /* SensorChartSheet.swift */,
 				F82B11E7789415F8CDA49B9A /* summary.md */,
 				AFB78923A16E617E7CFEE47A /* TextConversationView.swift */,
+				B56453E86C81122FE81CB1E1 /* ZoomableImagePreview.swift */,
 				DFC320A670A990AF4D6F8F0F /* PreviewAudio */,
 			);
 			path = PlantTalkBLE;
@@ -381,6 +387,7 @@
 				11E4F7F39A27677B583B9B2E /* ConversationListView.swift in Sources */,
 				728BB87E8B19F0BFF6535A85 /* DayDetailView.swift in Sources */,
 				808EC7CEA736C9B0C18E8E57 /* DetailView.swift in Sources */,
+				B114BD3E7F50BE1E2FE90A96 /* GeneratedImageGalleryView.swift in Sources */,
 				1432C37CD7530194605805C3 /* HistoryOverviewView.swift in Sources */,
 				7E12548C2451BB279E1246B9 /* HistoryTransferProtocol.swift in Sources */,
 				D9359F9D5D564D1A7B3E19B0 /* OpenAICompatibleClient.swift in Sources */,
@@ -399,6 +406,7 @@
 				1D154556B5504A88C20BFE56 /* RealtimeConversationSheet.swift in Sources */,
 				2F526B588BA296AB751A2BBC /* SensorChartSheet.swift in Sources */,
 				DBBCB5456BACBA6BEAAC9913 /* TextConversationView.swift in Sources */,
+				9CF131CC932C90E8C1780D6D /* ZoomableImagePreview.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

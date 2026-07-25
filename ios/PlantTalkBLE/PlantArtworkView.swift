@@ -366,6 +366,130 @@ enum PlantArtworkStorage {
     }
 }
 
+
+struct GeneratedPlantImage: Identifiable, Equatable {
+    let id: String
+    let createdAt: Date
+    let image: UIImage
+
+    static func == (lhs: GeneratedPlantImage, rhs: GeneratedPlantImage) -> Bool {
+        lhs.id == rhs.id && lhs.createdAt == rhs.createdAt
+    }
+}
+
+/// Append-only local gallery of images produced by in-app AI generation.
+enum GeneratedPlantImageStorage {
+    private struct IndexEntry: Codable, Equatable {
+        let id: String
+        let createdAt: Date
+        let fileName: String
+    }
+
+    private static let directoryName = "GeneratedPlantImages"
+    private static let indexFileName = "index.json"
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }()
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    static func loadAll() -> [GeneratedPlantImage] {
+        guard let directoryURL else { return [] }
+        let entries = loadIndex(from: directoryURL)
+        return entries.compactMap { entry in
+            let fileURL = directoryURL.appendingPathComponent(entry.fileName)
+            guard let image = UIImage(contentsOfFile: fileURL.path) else {
+                return nil
+            }
+            return GeneratedPlantImage(
+                id: entry.id,
+                createdAt: entry.createdAt,
+                image: image
+            )
+        }
+    }
+
+    @discardableResult
+    static func save(_ image: UIImage) -> GeneratedPlantImage? {
+        guard let directoryURL,
+              let imageData = image.jpegData(compressionQuality: 0.92) else {
+            return nil
+        }
+
+        let id = UUID().uuidString
+        let fileName = "\(id).jpg"
+        let entry = IndexEntry(
+            id: id,
+            createdAt: Date(),
+            fileName: fileName
+        )
+
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            try imageData.write(
+                to: directoryURL.appendingPathComponent(fileName),
+                options: .atomic
+            )
+            var entries = loadIndex(from: directoryURL)
+            entries.insert(entry, at: 0)
+            try writeIndex(entries, to: directoryURL)
+            return GeneratedPlantImage(
+                id: id,
+                createdAt: entry.createdAt,
+                image: image
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    static func delete(id: String) {
+        guard let directoryURL else { return }
+        var entries = loadIndex(from: directoryURL)
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        let entry = entries.remove(at: index)
+        try? FileManager.default.removeItem(
+            at: directoryURL.appendingPathComponent(entry.fileName)
+        )
+        try? writeIndex(entries, to: directoryURL)
+        if entries.isEmpty {
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+    }
+
+    private static func loadIndex(from directoryURL: URL) -> [IndexEntry] {
+        let indexURL = directoryURL.appendingPathComponent(indexFileName)
+        guard let data = try? Data(contentsOf: indexURL),
+              let entries = try? decoder.decode([IndexEntry].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    private static func writeIndex(_ entries: [IndexEntry], to directoryURL: URL) throws {
+        let data = try encoder.encode(entries)
+        try data.write(
+            to: directoryURL.appendingPathComponent(indexFileName),
+            options: .atomic
+        )
+    }
+
+    private static var directoryURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(directoryName, isDirectory: true)
+    }
+}
+
 struct PlantArtworkControl: View {
     @Binding var artwork: PlantArtwork?
     let isDetailsExpanded: Bool
@@ -559,6 +683,7 @@ struct PlantArtworkControl: View {
                     request.prompt
                 )
                 try Task.checkCancellation()
+                GeneratedPlantImageStorage.save(generated)
                 artwork = PlantArtwork(
                     image: generated,
                     scale: request.scale,
@@ -665,6 +790,7 @@ struct PlantArtworkPlaceholder: View {
     var body: some View {
         GeometryReader { proxy in
             let shape = PlantArtworkFrameShape()
+            let leafSide = proxy.size.width * 0.28
 
             ZStack {
                 Color(uiColor: .secondarySystemBackground)
@@ -672,8 +798,13 @@ struct PlantArtworkPlaceholder: View {
                 if let artwork {
                     artworkImage(artwork, frameSize: proxy.size)
                 } else {
+                    // Draw the leaf as a resizable vector frame instead of a font size
+                    // so it scales with the card's geometry as one unit, matching the
+                    // rounded path rather than re-typesetting mid-animation.
                     Image(systemName: "leaf.fill")
-                        .font(.system(size: proxy.size.width * 0.28, weight: .medium))
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: leafSide, height: leafSide)
                         .foregroundStyle(.tint)
                 }
             }
@@ -684,6 +815,9 @@ struct PlantArtworkPlaceholder: View {
                     lineWidth: 1.5
                 )
             }
+            // Flatten fill, leaf/image, and stroke into one layer so size transforms
+            // apply to the finished card instead of animating subviews independently.
+            .compositingGroup()
         }
         .aspectRatio(3 / 4, contentMode: .fit)
     }

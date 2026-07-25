@@ -1,10 +1,12 @@
 import SwiftUI
+import UIKit
 
 struct HistoryOverviewView: View {
     let database: PlantDatabase
     let onContinueTextConversation: (AIConversation, [ChatMessage]) -> Void
     let onContinueRealtimeConversation: (AIConversation, [ChatMessage]) -> Void
     let onDetailPresentationChanged: (Bool) -> Void
+    let onApplyGeneratedImageToPlantCard: (UIImage) -> Void
     @State private var selectedTab: HistoryTab = .sensor
 
     var body: some View {
@@ -37,6 +39,14 @@ struct HistoryOverviewView: View {
                 .tabItem {
                     Label("实时语音", systemImage: "waveform")
                 }
+
+            GeneratedImageGalleryView(
+                onApplyToPlantCard: onApplyGeneratedImageToPlantCard
+            )
+                .tag(HistoryTab.generatedImages)
+                .tabItem {
+                    Label("AI 图片", systemImage: "photo.on.rectangle")
+                }
         }
         .scrollIndicators(.hidden, axes: .vertical)
     }
@@ -46,4 +56,5 @@ private enum HistoryTab: Hashable {
     case sensor
     case textConversation
     case realtimeConversation
+    case generatedImages
 }
