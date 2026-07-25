@@ -393,6 +393,12 @@ struct PlantArtworkControl: View {
             .task(id: selectedPhotoItem) {
                 guard let selectedPhotoItem else { return }
                 await loadImage(from: selectedPhotoItem)
+                // Clear after handling so a later view refresh / navigation pop
+                // cannot re-run this task and reopen the editor with the same pick.
+                guard !Task.isCancelled else { return }
+                if self.selectedPhotoItem == selectedPhotoItem {
+                    self.selectedPhotoItem = nil
+                }
             }
             .fullScreenCover(isPresented: $isCameraPresented) {
                 ConversationMediaPanel(
@@ -524,16 +530,27 @@ struct PlantArtworkControl: View {
         isCameraPresented = true
     }
 
-    /// Called from the editor's "AI 生图" button. The editor dismisses itself, so
-    /// this runs against the home card: the mask blooms in immediately, then the
-    /// request runs and swaps in the generated image (keeping the crop transform).
+    /// Called from the editor's "AI 生图" button. Clear presentation state first so
+    /// the editor cannot linger and reappear after a later navigation pop (for
+    /// example returning from AI Settings). Generation then continues on the home
+    /// card: the mask blooms in, the request runs, and the generated image replaces
+    /// the current artwork while preserving the crop transform.
     private func startGeneration(_ request: PlantArtworkGenerationRequest) {
         generationTask?.cancel()
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .easeInOut(duration: 0.4)) {
-            isGeneratingImage = true
-        }
+        // Tear down sheet / picker state before any parent visual updates.
+        // Leaving `editorDraft` set (or racing it with an animated
+        // `isGeneratingImage` change) can make the editor reappear when
+        // returning from a pushed screen such as AI Settings.
+        editorDraft = nil
+        selectedPhotoItem = nil
 
-        generationTask = Task {
+        generationTask = Task { @MainActor in
+            // Show the mask only after presentation state is cleared, on the
+            // same actor hop that owns the rest of the generation lifecycle.
+            withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .easeInOut(duration: 0.4)) {
+                isGeneratingImage = true
+            }
+
             do {
                 let configuration = try AISettingsStore.imageGenConfiguration()
                 let generated = try await imageGenerationClient.generate(
@@ -542,21 +559,17 @@ struct PlantArtworkControl: View {
                     request.prompt
                 )
                 try Task.checkCancellation()
-                await MainActor.run {
-                    artwork = PlantArtwork(
-                        image: generated,
-                        scale: request.scale,
-                        normalizedOffset: request.normalizedOffset
-                    )
-                    finishGeneration()
-                }
+                artwork = PlantArtwork(
+                    image: generated,
+                    scale: request.scale,
+                    normalizedOffset: request.normalizedOffset
+                )
+                finishGeneration()
             } catch is CancellationError {
-                await MainActor.run { finishGeneration() }
+                finishGeneration()
             } catch {
-                await MainActor.run {
-                    finishGeneration()
-                    generationError = PlantArtworkPickerError(message: error.localizedDescription)
-                }
+                finishGeneration()
+                generationError = PlantArtworkPickerError(message: error.localizedDescription)
             }
         }
     }
@@ -962,6 +975,8 @@ private struct PlantArtworkEditorView: View {
     private func startGeneration() {
         let trimmed = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = trimmed.isEmpty ? defaultPrompt : trimmed
+        // Parent clears `editorDraft` immediately inside `onGenerate`, which is the
+        // source of truth for `.sheet(item:)`. Keep `dismiss()` as a fallback.
         onGenerate(PlantArtworkGenerationRequest(
             image: draft.artwork.image,
             prompt: prompt,
