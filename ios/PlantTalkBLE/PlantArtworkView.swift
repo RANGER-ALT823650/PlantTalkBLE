@@ -753,7 +753,7 @@ private struct PlantArtworkEditorView: View {
                 }
             }
         }
-        .presentationDetents([.fraction(0.78), .large])
+        .presentationDetents([.fraction(0.822), .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
         .interactiveDismissDisabled(hasUnsavedTransformChanges)
