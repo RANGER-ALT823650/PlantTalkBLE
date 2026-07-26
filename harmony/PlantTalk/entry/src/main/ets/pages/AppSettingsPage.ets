@@ -12,9 +12,13 @@ struct AppSettingsPage {
   }
 
   private openAISettings(): void {
-    this.getUIContext().getRouter().pushUrl({
-      url: 'pages/AISettingsPage'
-    });
+    try {
+      this.getUIContext().getRouter().pushUrl({
+        url: 'pages/AISettingsPage'
+      });
+    } catch (_error) {
+      // Keep the settings page usable if navigation is temporarily unavailable.
+    }
   }
 
   @Builder

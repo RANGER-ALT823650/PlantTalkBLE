@@ -1,4 +1,5 @@
 import curves from '@ohos.curves';
+import { VoiceVisualAccentKind } from '../audio/VoiceVisualDriver';
 import { PlantReading } from '../model/PlantModels';
 import { accentColorFor, accentColorWithAlpha } from '../theme/AppTheme';
 import { DesignTokens } from '../theme/DesignTokens';
@@ -10,13 +11,23 @@ export struct HomeDashboard {
   @StorageLink('appTheme') appTheme: string = 'blue';
   @StorageLink('reduceMotion') reduceMotion: boolean = false;
   @Prop reading: PlantReading | null = null;
+  @Prop bluetoothStatus: string = '未连接';
+  @Prop bluetoothConnected: boolean = false;
   @Prop interactionSuppressed: boolean = false;
   @Prop motionPaused: boolean = false;
+  @Prop artworkUri: string = '';
+  @Prop isGeneratingArtwork: boolean = false;
+  @Prop voiceLevel: number = 0;
+  @Prop accentKind: VoiceVisualAccentKind = VoiceVisualAccentKind.NONE;
+  @Prop accentIntensity: number = 0;
+  @Prop accentSequence: number = 0;
   onOpenHistory: () => void = () => {};
   onToggleBluetooth: () => void = () => {};
   onOpenSettings: () => void = () => {};
   onSendText: (message: string) => void = () => {};
   onOpenRealtime: () => void = () => {};
+  onEditArtwork: () => void = () => {};
+  onCancelArtworkGeneration: () => void = () => {};
 
   @State private detailsExpanded: boolean = false;
   @State private draft: string = '';
@@ -27,6 +38,10 @@ export struct HomeDashboard {
     return Math.min(this.contentWidth, DesignTokens.CONTENT_MAX_WIDTH);
   }
 
+  private isCompactCoverScreen(): boolean {
+    return this.contentWidth <= 350 && this.contentHeight <= 360;
+  }
+
   private artworkWidth(): number {
     const usableWidth = this.layoutWidth() * (1 - DesignTokens.PAGE_HORIZONTAL_RATIO * 2);
     const widthDriven = usableWidth * (
@@ -34,16 +49,28 @@ export struct HomeDashboard {
         ? DesignTokens.ARTWORK_EXPANDED_RATIO
         : DesignTokens.ARTWORK_COLLAPSED_RATIO
     );
-    const heightDriven = this.contentHeight * (this.detailsExpanded ? 0.25 : 0.42);
-    return Math.min(widthDriven, heightDriven);
+    const expandedHeightRatio =
+      this.isCompactCoverScreen() && this.detailsExpanded ? 0.38 : 0.25;
+    const heightDriven = this.contentHeight * (
+      this.detailsExpanded ? expandedHeightRatio : 0.42
+    );
+    return Math.max(0, Math.min(widthDriven, heightDriven));
+  }
+
+  private artworkEditButtonSize(): number {
+    return this.isCompactCoverScreen() && this.detailsExpanded ? 32 : 40;
+  }
+
+  private artworkEditButtonInset(): number {
+    return this.isCompactCoverScreen() && this.detailsExpanded ? 6 : 10;
   }
 
   private orbWidth(): number {
     const usableWidth = this.layoutWidth() * (1 - DesignTokens.PAGE_HORIZONTAL_RATIO * 2);
-    return Math.min(
+    return Math.max(0, Math.min(
       usableWidth * DesignTokens.ORB_WIDTH_RATIO,
       this.contentHeight * 0.22
-    );
+    ));
   }
 
   private submitDraft(): void {
@@ -56,7 +83,7 @@ export struct HomeDashboard {
   }
 
   private toggleDetails(): void {
-    if (this.interactionSuppressed) {
+    if (this.interactionSuppressed || this.isGeneratingArtwork) {
       return;
     }
     this.getUIContext().animateTo({
@@ -141,11 +168,15 @@ export struct HomeDashboard {
   }
 
   @Builder
-  private toolbar() {
+  private dashboardToolbar() {
     Row() {
       this.toolbarButton('◷', '查看历史记录', this.onOpenHistory)
       Blank()
-      this.toolbarButton('ᛒ', '连接蓝牙', this.onToggleBluetooth)
+      this.toolbarButton(
+        this.bluetoothConnected ? '●' : 'ᛒ',
+        `${this.bluetoothConnected ? '断开' : '连接'}蓝牙，${this.bluetoothStatus}`,
+        this.onToggleBluetooth
+      )
       this.toolbarButton('⚙', '设置', this.onOpenSettings)
     }
     .height(DesignTokens.TOOLBAR_HEIGHT)
@@ -202,20 +233,156 @@ export struct HomeDashboard {
   }
 
   @Builder
-  private artwork() {
+  private defaultArtwork() {
     Stack({ alignContent: Alignment.Center }) {
       Text('🌿')
         .fontSize(this.artworkWidth() * 0.28)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.background_secondary'))
+  }
+
+  @Builder
+  private artworkImage() {
+    if (this.artworkUri.length > 0) {
+      Image(this.artworkUri)
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+    } else {
+      this.defaultArtwork()
+    }
+  }
+
+  @Builder
+  private generationMask() {
+    Stack({ alignContent: Alignment.Center }) {
+      Row()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#B84A4A4A')
+
+      Circle()
+        .width('74%')
+        .aspectRatio(1)
+        .fill(accentColorWithAlpha(this.appTheme, '70'))
+        .opacity(0.42)
+
+      Circle()
+        .width('45%')
+        .aspectRatio(1)
+        .fill(Color.White)
+        .opacity(0.18)
+
+      Column({ space: 10 }) {
+        LoadingProgress()
+          .width(32)
+          .height(32)
+          .color(Color.White)
+
+        Text('正在生成 AI 图片')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(Color.White)
+
+        Button('取消')
+          .height(36)
+          .padding({ left: 18, right: 18 })
+          .fontSize(13)
+          .fontColor(Color.White)
+          .backgroundColor('#52111111')
+          .border({
+            width: 1,
+            color: '#70FFFFFF'
+          })
+          .enabled(!this.interactionSuppressed)
+          .opacity(this.interactionSuppressed ? 0.5 : 1)
+          .onClick(() => {
+            if (!this.interactionSuppressed) {
+              this.onCancelArtworkGeneration();
+            }
+          })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .accessibilityText('正在生成 AI 图片，可以取消')
+  }
+
+  @Builder
+  private editArtworkButton() {
+    Button() {
+      Text('✎')
+        .fontSize(
+          this.isCompactCoverScreen() && this.detailsExpanded ? 15 : 17
+        )
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+    }
+    .width(this.artworkEditButtonSize())
+    .height(this.artworkEditButtonSize())
+    .borderRadius(this.artworkEditButtonSize() / 2)
+    .backgroundColor($r('app.color.surface_translucent'))
+    .border({
+      width: 1,
+      color: $r('app.color.separator')
+    })
+    .enabled(!this.interactionSuppressed)
+    .opacity(this.interactionSuppressed ? 0.5 : 1)
+    .accessibilityText(this.artworkUri.length > 0 ? '编辑植物图片' : '选择植物图片')
+    .onClick(() => {
+      if (!this.interactionSuppressed) {
+        this.onEditArtwork();
+      }
+    })
+  }
+
+  @Builder
+  private artwork() {
+    Stack({ alignContent: Alignment.TopEnd }) {
+      Stack({ alignContent: Alignment.Center }) {
+        this.artworkImage()
+      }
+      .width('100%')
+      .height('100%')
+      .accessibilityText(
+        this.detailsExpanded ? '收起植物状态' : '查看植物状态'
+      )
+      .onClick(() => this.toggleDetails())
+      .gesture(
+        LongPressGesture({
+          repeat: false,
+          duration: 500
+        })
+          .onAction(() => {
+            if (!this.isGeneratingArtwork && !this.interactionSuppressed) {
+              this.onEditArtwork();
+            }
+          })
+      )
+
+      if (this.isGeneratingArtwork) {
+        this.generationMask()
+      } else {
+        Row() {
+          this.editArtworkButton()
+        }
+        .padding({
+          top: this.artworkEditButtonInset(),
+          right: this.artworkEditButtonInset()
+        })
+      }
     }
     .width(this.artworkWidth())
     .aspectRatio(0.75)
     .backgroundColor($r('app.color.background_secondary'))
     .borderRadius(this.artworkWidth() * 0.14)
+    .clip(true)
     .border({
       width: 1.5,
       color: accentColorWithAlpha(this.appTheme, '80')
     })
-    .onClick(() => this.toggleDetails())
   }
 
   @Builder
@@ -239,7 +406,7 @@ export struct HomeDashboard {
 
   build() {
     Column() {
-      this.toolbar()
+      this.dashboardToolbar()
 
       Scroll() {
         Column() {
@@ -247,7 +414,11 @@ export struct HomeDashboard {
             this.composer()
             Blank().height(12)
           } else {
-            Blank().height(this.contentHeight * 0.12)
+            Blank().height(
+              this.isCompactCoverScreen()
+                ? 8
+                : this.contentHeight * 0.12
+            )
           }
 
           this.artwork()
@@ -257,11 +428,18 @@ export struct HomeDashboard {
             this.sensorGrid()
           }
 
-          Blank().layoutWeight(1)
+          if (this.isCompactCoverScreen()) {
+            Blank().height(10)
+          } else {
+            Blank().layoutWeight(1)
+          }
 
           DiffuseOrbFallback({
             paused: this.motionPaused,
-            normalizedLevel: 0
+            normalizedLevel: this.voiceLevel,
+            accentKind: this.accentKind,
+            accentIntensity: this.accentIntensity,
+            accentSequence: this.accentSequence
           })
             .width(this.orbWidth())
             .onClick(() => {
@@ -273,8 +451,10 @@ export struct HomeDashboard {
           Blank().height(16)
         }
         .width('100%')
-        .height(Math.max(this.contentHeight, this.detailsExpanded ? 760 : 540))
-        .constraintSize({ maxWidth: DesignTokens.CONTENT_MAX_WIDTH })
+        .constraintSize({
+          minHeight: Math.max(0, this.contentHeight),
+          maxWidth: DesignTokens.CONTENT_MAX_WIDTH
+        })
         .alignSelf(ItemAlign.Center)
         .padding({
           left: this.layoutWidth() * DesignTokens.PAGE_HORIZONTAL_RATIO,
@@ -290,8 +470,12 @@ export struct HomeDashboard {
     .height('100%')
     .backgroundColor($r('app.color.background_primary'))
     .onAreaChange((_oldArea, newArea) => {
-      this.contentWidth = Number.parseFloat(newArea.width.toString());
-      this.contentHeight = Number.parseFloat(newArea.height.toString()) - DesignTokens.TOOLBAR_HEIGHT;
+      const measuredWidth = Number.parseFloat(newArea.width.toString());
+      const measuredHeight = Number.parseFloat(newArea.height.toString());
+      if (measuredWidth > 0 && measuredHeight > DesignTokens.TOOLBAR_HEIGHT) {
+        this.contentWidth = measuredWidth;
+        this.contentHeight = measuredHeight - DesignTokens.TOOLBAR_HEIGHT;
+      }
     })
   }
 }
