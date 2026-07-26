@@ -95,6 +95,49 @@ final class QwenRealtimeProtocolTests: XCTestCase {
     }
 
     @MainActor
+    func testConnectionPulseIsEmittedRegardlessOfAccentCooldown() throws {
+        let driver = VoiceVisualDriver(randomUnit: { 0 })
+        let start = Date(timeIntervalSinceReferenceDate: 4_000)
+
+        // Arm the strong-pulse cooldown, which would suppress an audio accent.
+        driver.ingest(source: .user, levelDBFS: -52, at: start)
+        driver.ingest(
+            source: .user,
+            levelDBFS: -12,
+            at: start.addingTimeInterval(0.08)
+        )
+        let speechAccent = try XCTUnwrap(driver.accent)
+        XCTAssertEqual(speechAccent.kind, .strongPulse)
+
+        driver.emitConnectionEstablishedPulse(at: start.addingTimeInterval(0.1))
+        let connectionAccent = try XCTUnwrap(driver.accent)
+        XCTAssertEqual(connectionAccent.kind, .connectionEstablished)
+        XCTAssertNotEqual(connectionAccent.id, speechAccent.id)
+        // The connection pulse scales the whole orb instead of folding the mesh.
+        XCTAssertFalse(connectionAccent.deformsMesh)
+        XCTAssertEqual(connectionAccent.offset, .zero)
+        XCTAssertEqual(connectionAccent.intensity, 1)
+    }
+
+    @MainActor
+    func testConnectionPulseArmsCooldownSoSpeechDoesNotStackOnTopOfIt() throws {
+        let driver = VoiceVisualDriver(randomUnit: { 0 })
+        let start = Date(timeIntervalSinceReferenceDate: 5_000)
+
+        driver.emitConnectionEstablishedPulse(at: start)
+        let connectionAccent = try XCTUnwrap(driver.accent)
+
+        // A sharp onset within the cooldown window must not replace the pulse.
+        driver.ingest(source: .user, levelDBFS: -52, at: start)
+        driver.ingest(
+            source: .user,
+            levelDBFS: -12,
+            at: start.addingTimeInterval(0.08)
+        )
+        XCTAssertEqual(driver.accent?.id, connectionAccent.id)
+    }
+
+    @MainActor
     func testVoiceVisualDriverDoesNotReactToSteadyBackgroundLevel() {
         let driver = VoiceVisualDriver(randomUnit: { 0 })
         let start = Date(timeIntervalSinceReferenceDate: 2_000)

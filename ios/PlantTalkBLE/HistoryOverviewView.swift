@@ -3,12 +3,11 @@ import UIKit
 
 struct HistoryOverviewView: View {
     let database: PlantDatabase
+    @Binding var selectedTab: HistoryTab
     let onContinueTextConversation: (AIConversation, [ChatMessage]) -> Void
     let onContinueRealtimeConversation: (AIConversation, [ChatMessage]) -> Void
     let onDetailPresentationChanged: (Bool) -> Void
     let onApplyGeneratedImageToPlantCard: (UIImage) -> Void
-    @State private var selectedTab: HistoryTab = .sensor
-
     var body: some View {
         TabView(selection: $selectedTab) {
             DetailView(
@@ -49,10 +48,11 @@ struct HistoryOverviewView: View {
                 }
         }
         .scrollIndicators(.hidden, axes: .vertical)
+        .sensoryFeedback(.selection, trigger: selectedTab)
     }
 }
 
-private enum HistoryTab: Hashable {
+enum HistoryTab: Hashable {
     case sensor
     case textConversation
     case realtimeConversation

@@ -60,6 +60,11 @@ struct ZoomableImagePreviewOverlay: View {
                         cornerWidth: currentCorner.width,
                         cornerHeight: currentCorner.height
                     ))
+                    .shadow(
+                        color: .black.opacity(0.18 * progress),
+                        radius: 12 * progress,
+                        y: 4 * progress
+                    )
                     .position(x: currentFrame.midX, y: currentFrame.midY)
                     .accessibilityLabel("图片预览")
                     .accessibilityHint("轻点关闭预览")

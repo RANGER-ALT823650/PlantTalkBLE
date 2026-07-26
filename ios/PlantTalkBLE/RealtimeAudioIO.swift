@@ -10,6 +10,10 @@ enum VoiceAudioSource: Hashable, Sendable {
 enum VoiceVisualAccentKind: Equatable, Sendable {
     case colorShift
     case strongPulse
+    /// Fired once when the realtime model connects. Unlike the audio-driven
+    /// accents this one scales the whole orb instead of folding a single mesh
+    /// vertex, so a successful connection never looks like ordinary speech.
+    case connectionEstablished
 }
 
 struct VoiceVisualAccent: Equatable, Sendable {
@@ -19,6 +23,12 @@ struct VoiceVisualAccent: Equatable, Sendable {
     let offset: SIMD2<Float>
     let intensity: Double
     let startedAt: TimeInterval
+
+    /// The connection pulse deliberately leaves the mesh untouched: a localized
+    /// fold or highlight would read as another voice accent.
+    var deformsMesh: Bool {
+        kind != .connectionEstablished
+    }
 }
 
 struct AudioLevelAnalyzer {
@@ -145,6 +155,24 @@ final class VoiceVisualDriver {
         }
     }
 
+    /// Signals a successful realtime connection. Emitted directly rather than
+    /// through the level pipeline so it is never suppressed by the accent
+    /// cooldowns, and it also arms those cooldowns so the first words spoken
+    /// after connecting do not stack a second pulse on top of this one.
+    func emitConnectionEstablishedPulse(at date: Date = .now) {
+        let now = date.timeIntervalSinceReferenceDate
+        lastStrongPulseAt = now
+        lastColorShiftAt = now
+        accent = VoiceVisualAccent(
+            id: UUID(),
+            kind: .connectionEstablished,
+            meshPointIndex: 5,
+            offset: .zero,
+            intensity: 1,
+            startedAt: now
+        )
+    }
+
     func reset() {
         normalizedLevel = 0
         accent = nil
@@ -223,7 +251,17 @@ struct RealtimeMicrophoneChunk: Sendable {
 
 /// Owns the full-duplex audio graph used by Qwen Realtime. The microphone is
 /// converted to mono PCM16 at 16 kHz; response audio is PCM16 at 24 kHz.
-final class RealtimeAudioIO {
+///
+/// Every `AVAudioSession` / `AVAudioEngine` call runs on `engineQueue`. Session
+/// activation, voice-processing installation and engine start each block for
+/// tens to hundreds of milliseconds; running them on the main actor froze the
+/// home orb's `TimelineView` for the whole connection handshake. The queue is
+/// serial, so node access stays ordered exactly as the callers issued it.
+final class RealtimeAudioIO: @unchecked Sendable {
+    private let engineQueue = DispatchQueue(
+        label: "com.example.PlantTalkBLE.realtime-audio",
+        qos: .userInitiated
+    )
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let inputFormat = AVAudioFormat(
@@ -252,7 +290,13 @@ final class RealtimeAudioIO {
     /// Activates the record/playback session before the realtime socket begins.
     /// This is intentionally separate from starting the engine because a first-run
     /// microphone permission alert can temporarily disturb the audio-session lifecycle.
-    func prepareForRealtimeConversation() throws {
+    func prepareForRealtimeConversation() async throws {
+        try await onEngineQueue { [self] in
+            try activateSessionOnEngineQueue()
+        }
+    }
+
+    private func activateSessionOnEngineQueue() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
@@ -266,12 +310,24 @@ final class RealtimeAudioIO {
     func start(
         onMicrophonePCM: @escaping @Sendable (RealtimeMicrophoneChunk) -> Void,
         onResponseLevelDBFS: @escaping @Sendable (Float) -> Void
+    ) async throws {
+        try await onEngineQueue { [self] in
+            try startOnEngineQueue(
+                onMicrophonePCM: onMicrophonePCM,
+                onResponseLevelDBFS: onResponseLevelDBFS
+            )
+        }
+    }
+
+    private func startOnEngineQueue(
+        onMicrophonePCM: @escaping @Sendable (RealtimeMicrophoneChunk) -> Void,
+        onResponseLevelDBFS: @escaping @Sendable (Float) -> Void
     ) throws {
         guard let inputFormat, let outputFormat else {
             throw RealtimeAudioError.unsupportedAudioFormat
         }
 
-        try prepareForRealtimeConversation()
+        try activateSessionOnEngineQueue()
 
         let inputNode = engine.inputNode
         do {
@@ -356,67 +412,99 @@ final class RealtimeAudioIO {
         player.play()
     }
 
-    @discardableResult
-    func playResponsePCM(_ data: Data) -> Float? {
+    /// Fire-and-forget: the caller never waits for the scheduling hop, and the
+    /// serial queue preserves the order in which chunks arrived.
+    func playResponsePCM(_ data: Data) {
         guard !data.isEmpty,
               data.count.isMultiple(of: MemoryLayout<Int16>.size),
               let outputFormat else {
-            return nil
+            return
         }
-        let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount),
-              let samples = buffer.int16ChannelData?.pointee else {
-            return nil
+        engineQueue.async { [self] in
+            let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: outputFormat,
+                frameCapacity: frameCount
+            ), let samples = buffer.int16ChannelData?.pointee else {
+                return
+            }
+            buffer.frameLength = frameCount
+            data.copyBytes(to: UnsafeMutableRawBufferPointer(
+                start: samples,
+                count: data.count
+            ))
+            let levelDBFS = AudioLevelAnalyzer.levelDBFS(
+                samples: samples,
+                count: Int(frameCount)
+            )
+            guard engine.isRunning else { return }
+            let generation = markResponseBufferScheduled(levelDBFS: levelDBFS)
+            player.scheduleBuffer(
+                buffer,
+                completionCallbackType: .dataPlayedBack
+            ) { [weak self] _ in
+                self?.markResponseBufferFinished(generation: generation)
+            }
+            if !player.isPlaying {
+                player.play()
+            }
         }
-        buffer.frameLength = frameCount
-        data.copyBytes(to: UnsafeMutableRawBufferPointer(
-            start: samples,
-            count: data.count
-        ))
-        let levelDBFS = AudioLevelAnalyzer.levelDBFS(
-            samples: samples,
-            count: Int(frameCount)
-        )
-        let generation = markResponseBufferScheduled(levelDBFS: levelDBFS)
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            self?.markResponseBufferFinished(generation: generation)
-        }
-        if !player.isPlaying {
-            player.play()
-        }
-        return levelDBFS
     }
 
     func interruptPlayback() {
+        // Invalidate the generation synchronously so microphone frames stop
+        // being treated as echo the instant a barge-in is confirmed.
         playbackStateLock.withLock {
             playbackGeneration += 1
             scheduledResponseBufferCount = 0
             responseLevelDBFS = -160
         }
-        player.stop()
-        player.play()
+        engineQueue.async { [self] in
+            guard engine.isRunning else { return }
+            player.stop()
+            player.play()
+        }
     }
 
     func stop() {
-        if hasInputTap {
-            engine.inputNode.removeTap(onBus: 0)
-            hasInputTap = false
-        }
-        if hasResponseLevelTap {
-            engine.mainMixerNode.removeTap(onBus: 0)
-            hasResponseLevelTap = false
-        }
-        player.stop()
-        engine.stop()
         playbackStateLock.withLock {
             playbackGeneration += 1
             scheduledResponseBufferCount = 0
             responseLevelDBFS = -160
         }
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        engineQueue.async { [self] in
+            if hasInputTap {
+                engine.inputNode.removeTap(onBus: 0)
+                hasInputTap = false
+            }
+            if hasResponseLevelTap {
+                engine.mainMixerNode.removeTap(onBus: 0)
+                hasResponseLevelTap = false
+            }
+            player.stop()
+            engine.stop()
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
+    }
+
+    /// Runs a blocking audio-graph operation on the serial engine queue without
+    /// blocking the caller's thread (in practice: the main actor).
+    private func onEngineQueue(
+        _ work: @escaping @Sendable () throws -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            engineQueue.async {
+                do {
+                    try work()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private func markResponseBufferScheduled(levelDBFS: Float) -> Int {

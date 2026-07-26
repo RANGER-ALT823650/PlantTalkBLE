@@ -3,6 +3,38 @@ import Observation
 
 private let conversationScrollCoordinateSpace = "plant-talk-text-conversation-scroll"
 
+enum ConversationDateGrouping {
+    static func firstUserMessageIDs(
+        initialMessageID: UUID?,
+        initialMessageDate: Date?,
+        messages: [ChatMessage],
+        calendar: Calendar = .current
+    ) -> Set<UUID> {
+        var seenDays: Set<Date> = []
+        var result: Set<UUID> = []
+
+        func recordFirstUserMessage(id: UUID, date: Date) {
+            let day = calendar.startOfDay(for: date)
+            if seenDays.insert(day).inserted {
+                result.insert(id)
+            }
+        }
+
+        if let initialMessageID, let initialMessageDate {
+            recordFirstUserMessage(
+                id: initialMessageID,
+                date: initialMessageDate
+            )
+        }
+
+        for message in messages where message.role == .user {
+            recordFirstUserMessage(id: message.id, date: message.createdAt)
+        }
+
+        return result
+    }
+}
+
 private enum ConversationMediaLayout {
     static let horizontalInset: CGFloat = 12
     static let bottomInset: CGFloat = 12
@@ -415,6 +447,9 @@ struct TextConversationView: View {
     @State private var flightDestinationReadyID: UUID?
     @State private var pendingCatchUpMessageID: UUID?
     @State private var isScrolledToBottom = true
+    // Decided once, from the transcript this view opens with, so the stack
+    // never changes identity — and never rebuilds every row — mid-session.
+    @State private var rendersTranscriptEagerly: Bool
     @State private var isInitialMessageDiscarded = false
     @State private var streamingAssistantState = StreamingAssistantState()
     @State private var isStreaming = false
@@ -498,6 +533,10 @@ struct TextConversationView: View {
         _isComposerVisible = State(initialValue: resumedConversation != nil)
         _hasStartedInitialMessage = State(initialValue: resumedConversation != nil)
         _pendingImageAttachments = State(initialValue: initialPendingImageAttachments)
+        _rendersTranscriptEagerly = State(
+            initialValue: resumedMessages.count
+                <= ConversationMotion.eagerTranscriptMessageLimit
+        )
     }
 
     var body: some View {
@@ -616,6 +655,19 @@ struct TextConversationView: View {
             return
         }
 
+        // Past the limit, eager layout costs more in dropped frames than the
+        // indicator correction costs in polish. Swapping the stack rebuilds
+        // every row, so only do it here, where the transcript is about to be
+        // pinned to the bottom anyway, and never swap back.
+        if rendersTranscriptEagerly,
+           messages.count > ConversationMotion.eagerTranscriptMessageLimit {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                rendersTranscriptEagerly = false
+            }
+        }
+
         if !isInitialTransitionComplete,
            messages.last?.id == initialMessageID {
             return
@@ -657,28 +709,60 @@ struct TextConversationView: View {
     /// The scrolling transcript. Extracted from `body` so the ViewBuilder
     /// type-checks this list independently of the long modifier chain below,
     /// keeping either expression well under the compiler's time limit.
+    ///
+    /// A lazy stack only *estimates* the height of rows it has not realized
+    /// yet, so `contentSize` is wrong while scrolling and gets corrected in a
+    /// single frame once the last rows are realized. The scroll indicator is
+    /// derived from `contentSize`, so that correction reads as the indicator
+    /// jumping down near the bottom. Laying the transcript out eagerly gives a
+    /// stable `contentSize` from the first frame; the cost is the up-front
+    /// layout of every bubble, which is why very long transcripts stay lazy and
+    /// keep a small residual jump instead of a slow open.
     private var messageList: some View {
-        LazyVStack(spacing: 12) {
+        Group {
+            if rendersTranscriptEagerly {
+                VStack(spacing: 12) { transcriptRows }
+            } else {
+                LazyVStack(spacing: 12) { transcriptRows }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptRows: some View {
+        Group {
             if !isInitialMessageDiscarded {
-                InitialTextMessageBubble(
-                    text: initialMessage,
-                    createdAt: initialMessageDate,
-                    transitionID: initialMessageID,
-                    isTransitionComplete: isInitialTransitionComplete
-                )
+                VStack(spacing: 8) {
+                    if dateHeaderMessageIDs.contains(initialMessageID) {
+                        ConversationDateHeader(date: initialMessageDate)
+                    }
+
+                    InitialTextMessageBubble(
+                        text: initialMessage,
+                        createdAt: initialMessageDate,
+                        transitionID: initialMessageID,
+                        isTransitionComplete: isInitialTransitionComplete
+                    )
+                }
                 .id(initialMessageID)
             }
 
             ForEach(messages) { message in
                 if message.id != initialMessageID {
-                    ChatMessageBubble(
-                        message: message,
-                        activeImagePreviewSourceID: imagePreviewItem?.id,
-                        onImagePreview: presentImagePreview,
-                        flightDestinationID: flightDestinationID(for: message),
-                        reportsFlightDestination: flightDestinationReadyID == message.id,
-                        isFlightComplete: isFlightComplete(for: message)
-                    )
+                    VStack(spacing: 8) {
+                        if dateHeaderMessageIDs.contains(message.id) {
+                            ConversationDateHeader(date: message.createdAt)
+                        }
+
+                        ChatMessageBubble(
+                            message: message,
+                            activeImagePreviewSourceID: imagePreviewItem?.id,
+                            onImagePreview: presentImagePreview,
+                            flightDestinationID: flightDestinationID(for: message),
+                            reportsFlightDestination: flightDestinationReadyID == message.id,
+                            isFlightComplete: isFlightComplete(for: message)
+                        )
+                    }
                     .id(message.id)
                 }
             }
@@ -691,6 +775,14 @@ struct TextConversationView: View {
 
             ConversationBottomMarker()
         }
+    }
+
+    private var dateHeaderMessageIDs: Set<UUID> {
+        ConversationDateGrouping.firstUserMessageIDs(
+            initialMessageID: isInitialMessageDiscarded ? nil : initialMessageID,
+            initialMessageDate: isInitialMessageDiscarded ? nil : initialMessageDate,
+            messages: messages
+        )
     }
 
     /// The message flight destination for `message`, if this row is the live
@@ -2115,6 +2207,11 @@ private enum OutgoingMessagePresentation: Equatable {
 }
 
 private enum ConversationMotion {
+    /// Transcripts up to this length are laid out eagerly so the scroll
+    /// indicator never jumps. Measured on iPhone 17 / iOS 26.5, eager layout
+    /// costs roughly +30ms at 40 messages and +170ms at 100; past ~200 it grows
+    /// past 400ms, which would be felt when opening a resumed conversation.
+    static let eagerTranscriptMessageLimit = 120
     static let bottomTolerance: CGFloat = 32
     static let catchUpDuration = 0.24
     static let catchUpDurationMilliseconds = 240
@@ -2541,6 +2638,20 @@ private struct ChatBubblePayload: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct ConversationDateHeader: View {
+    let date: Date
+
+    var body: some View {
+        Text(date.formatted(.dateTime.year().month().day().weekday(.abbreviated)))
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel(
+                date.formatted(.dateTime.year().month().day().weekday(.wide))
+            )
     }
 }
 
@@ -3167,6 +3278,53 @@ var isConversationTextSelectionActive: Bool {
     ConversationTextSelectionManager.shared.hasActiveSelection
 }
 
+/// The outer page gesture asks this registry only when a drag begins, avoiding
+/// parent-view state updates while the transcript itself is scrolling.
+@MainActor
+func isConversationImageSwipeExcluded(at point: CGPoint) -> Bool {
+    ConversationImageSwipeExclusionManager.shared.contains(point)
+}
+
+@MainActor
+private final class ConversationImageSwipeExclusionManager {
+    static let shared = ConversationImageSwipeExclusionManager()
+
+    private let views = NSHashTable<UIView>.weakObjects()
+
+    func register(_ view: UIView) {
+        views.add(view)
+    }
+
+    func unregister(_ view: UIView) {
+        views.remove(view)
+    }
+
+    func contains(_ point: CGPoint) -> Bool {
+        views.allObjects.contains { view in
+            guard view.window != nil,
+                  !view.isHidden,
+                  view.alpha > 0.01 else { return false }
+            return view.convert(view.bounds, to: nil).contains(point)
+        }
+    }
+}
+
+private struct ConversationImageSwipeExclusionRegion: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        ConversationImageSwipeExclusionManager.shared.register(view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: ()) {
+        ConversationImageSwipeExclusionManager.shared.unregister(uiView)
+    }
+}
+
 @MainActor
 private final class ConversationTextSelectionManager: NSObject,
     UIGestureRecognizerDelegate {
@@ -3293,6 +3451,9 @@ private struct ChatBubbleImageGrid: View {
                 }
                 .scrollIndicators(.hidden)
                 .frame(height: ConversationAttachmentLayout.itemSide)
+                .background {
+                    ConversationImageSwipeExclusionRegion()
+                }
             } else if let item = images.first {
                 imageButton(item)
             }

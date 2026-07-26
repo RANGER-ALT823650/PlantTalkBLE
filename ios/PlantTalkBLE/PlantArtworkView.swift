@@ -505,6 +505,7 @@ struct PlantArtworkControl: View {
     @State private var isGeneratingImage = false
     @State private var generationTask: Task<Void, Never>?
     @State private var generationError: PlantArtworkPickerError?
+    @State private var activeGenerationID: UUID?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -568,7 +569,10 @@ struct PlantArtworkControl: View {
     }
 
     private var artworkSurface: some View {
-        Button(action: onTap) {
+        Button {
+            guard !isGeneratingImage else { return }
+            onTap()
+        } label: {
             PlantArtworkPlaceholder(artwork: artwork)
                 .overlay {
                     if isLoadingImage {
@@ -584,26 +588,44 @@ struct PlantArtworkControl: View {
                 }
         }
         .buttonStyle(.plain)
-        .disabled(isGeneratingImage)
         .contentShape(.interaction, Rectangle())
         .contentShape(.contextMenuPreview, PlantArtworkFrameShape())
         .contextMenu {
-            if !isDetailsExpanded && !isGeneratingImage {
+            if isGeneratingImage {
+                Button(role: .destructive, action: cancelGeneration) {
+                    Label("取消 AI 生图", systemImage: "xmark.circle")
+                }
+            } else if !isDetailsExpanded {
                 artworkMenu
             }
         }
         .geometryGroup()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isDetailsExpanded ? "收起植物状态" : "查看植物状态")
-        .accessibilityValue(isDetailsExpanded ? "已展开" : "已收起")
-        .accessibilityHint(
-            isDetailsExpanded
-                ? "显示或隐藏传感器数据"
-                : "轻点展开植物状态，长按可以选择植物图片"
+        .accessibilityLabel(
+            isGeneratingImage
+                ? "正在生成 AI 图片"
+                : (isDetailsExpanded ? "收起植物状态" : "查看植物状态")
         )
-        .accessibilityAction(named: "选择植物图片") {
-            guard !isDetailsExpanded else { return }
-            choosePhoto()
+        .accessibilityValue(
+            isGeneratingImage ? "长按可以取消" : (isDetailsExpanded ? "已展开" : "已收起")
+        )
+        .accessibilityHint(
+            isGeneratingImage
+                ? "长按并选择取消 AI 生图，将恢复显示原来的图片"
+                : (
+                    isDetailsExpanded
+                        ? "显示或隐藏传感器数据"
+                        : "轻点展开植物状态，长按可以选择植物图片"
+                )
+        )
+        .accessibilityAction(
+            named: Text(isGeneratingImage ? "取消 AI 生图" : "选择植物图片")
+        ) {
+            if isGeneratingImage {
+                cancelGeneration()
+            } else if !isDetailsExpanded {
+                choosePhoto()
+            }
         }
     }
 
@@ -661,6 +683,8 @@ struct PlantArtworkControl: View {
     /// the current artwork while preserving the crop transform.
     private func startGeneration(_ request: PlantArtworkGenerationRequest) {
         generationTask?.cancel()
+        let generationID = UUID()
+        activeGenerationID = generationID
         // Tear down sheet / picker state before any parent visual updates.
         // Leaving `editorDraft` set (or racing it with an animated
         // `isGeneratingImage` change) can make the editor reappear when
@@ -683,27 +707,40 @@ struct PlantArtworkControl: View {
                     request.prompt
                 )
                 try Task.checkCancellation()
+                guard activeGenerationID == generationID else { return }
                 GeneratedPlantImageStorage.save(generated)
                 artwork = PlantArtwork(
                     image: generated,
                     scale: request.scale,
                     normalizedOffset: request.normalizedOffset
                 )
-                finishGeneration()
+                finishGeneration(generationID)
             } catch is CancellationError {
-                finishGeneration()
+                finishGeneration(generationID)
             } catch {
-                finishGeneration()
+                guard activeGenerationID == generationID else { return }
+                finishGeneration(generationID)
                 generationError = PlantArtworkPickerError(message: error.localizedDescription)
             }
         }
     }
 
-    private func finishGeneration() {
+    /// Keep the current artwork in place and reveal it through the same mask fade
+    /// used when generation completes. Cancelling the parent task also propagates
+    /// to URLSession so a late response cannot replace the restored image.
+    private func cancelGeneration() {
+        guard isGeneratingImage, let activeGenerationID else { return }
+        generationTask?.cancel()
+        finishGeneration(activeGenerationID)
+    }
+
+    private func finishGeneration(_ generationID: UUID) {
+        guard activeGenerationID == generationID else { return }
         withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .easeInOut(duration: 0.4)) {
             isGeneratingImage = false
         }
         generationTask = nil
+        activeGenerationID = nil
     }
 
     @MainActor

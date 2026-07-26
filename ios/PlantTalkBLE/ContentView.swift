@@ -6,12 +6,18 @@ import UIKit
 
 let messageFlightCoordinateSpace = "plant-talk-message-flight"
 
-/// Plays the "Soft Swell" success haptic used to confirm a realtime connection.
-/// A single ~0.45s continuous vibration whose intensity follows a bell-shaped
-/// envelope (quick rise, brief peak, gentle fall), giving a lingering feel that
-/// is clearly more than a single tap without dragging on. Falls back to the
-/// system success notification when Core Haptics is unavailable (simulator or
-/// unsupported hardware).
+/// Owns the two haptics of the realtime-voice flow:
+///
+/// - `playTapConfirmation()` — a crisp, very short double tick played the moment
+///   the orb is tapped, acknowledging that the request was accepted.
+/// - `playSuccess()` — the "Soft Swell": one ~0.45s continuous vibration whose
+///   intensity follows a bell-shaped envelope (quick rise, brief peak, gentle
+///   fall), played when the realtime model actually connects.
+///
+/// Both fall back to system feedback generators when Core Haptics is unavailable
+/// (simulator or unsupported hardware). Engine start always goes through the
+/// completion-handler form so a cold or auto-shut-down engine never blocks the
+/// main actor — that would stall the orb's animation clock.
 @MainActor
 final class RealtimeConnectionHaptic {
     private var engine: CHHapticEngine?
@@ -26,66 +32,132 @@ final class RealtimeConnectionHaptic {
             engine.isAutoShutdownEnabled = true
             // A reset drops the running instance; rebuild lazily on next play.
             engine.resetHandler = { [weak self] in
-                try? self?.engine?.start()
+                self?.engine?.start(completionHandler: nil)
             }
-            try engine.start()
+            engine.start(completionHandler: nil)
             self.engine = engine
         } catch {
             engine = nil
         }
     }
 
+    /// Two tightly spaced transients, the second brighter than the first. Short
+    /// enough (~70ms) to feel like a single crisp click rather than a buzz, but
+    /// the rising pair reads as confirmation instead of a plain tap.
+    func playTapConfirmation() {
+        play(
+            makePattern: {
+                try CHHapticPattern(
+                    events: [
+                        CHHapticEvent(
+                            eventType: .hapticTransient,
+                            parameters: [
+                                CHHapticEventParameter(
+                                    parameterID: .hapticIntensity,
+                                    value: 0.75
+                                ),
+                                CHHapticEventParameter(
+                                    parameterID: .hapticSharpness,
+                                    value: 0.85
+                                )
+                            ],
+                            relativeTime: 0
+                        ),
+                        CHHapticEvent(
+                            eventType: .hapticTransient,
+                            parameters: [
+                                CHHapticEventParameter(
+                                    parameterID: .hapticIntensity,
+                                    value: 0.55
+                                ),
+                                CHHapticEventParameter(
+                                    parameterID: .hapticSharpness,
+                                    value: 1
+                                )
+                            ],
+                            relativeTime: 0.07
+                        )
+                    ],
+                    parameters: []
+                )
+            },
+            fallback: {
+                let generator = UIImpactFeedbackGenerator(style: .rigid)
+                generator.impactOccurred(intensity: 0.9)
+            }
+        )
+    }
+
     func playSuccess() {
+        play(
+            makePattern: {
+                let swell = CHHapticEvent(
+                    eventType: .hapticContinuous,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.7),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
+                    ],
+                    relativeTime: 0,
+                    duration: 0.45
+                )
+                // Bell-shaped intensity: quick rise → peak → gentle fall.
+                let bellCurve = CHHapticParameterCurve(
+                    parameterID: .hapticIntensityControl,
+                    controlPoints: [
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.15),
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0.14, value: 0.95),
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0.26, value: 0.85),
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.0)
+                    ],
+                    relativeTime: 0
+                )
+                // Sharpness lifts slightly so the tail reads brighter, not muffled.
+                let sharpnessCurve = CHHapticParameterCurve(
+                    parameterID: .hapticSharpnessControl,
+                    controlPoints: [
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.2),
+                        CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.5)
+                    ],
+                    relativeTime: 0
+                )
+                return try CHHapticPattern(
+                    events: [swell],
+                    parameterCurves: [bellCurve, sharpnessCurve]
+                )
+            },
+            fallback: {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
+        )
+    }
+
+    private func play(
+        makePattern: () throws -> CHHapticPattern,
+        fallback: @escaping @MainActor () -> Void
+    ) {
         guard supportsHaptics else {
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            fallback()
             return
         }
-        if engine == nil { prepare() }
-        guard let engine else {
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        prepare()
+        guard let engine, let pattern = try? makePattern() else {
+            fallback()
             return
         }
 
-        let swell = CHHapticEvent(
-            eventType: .hapticContinuous,
-            parameters: [
-                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.7),
-                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
-            ],
-            relativeTime: 0,
-            duration: 0.45
-        )
-        // Bell-shaped intensity: quick rise → peak → gentle fall.
-        let bellCurve = CHHapticParameterCurve(
-            parameterID: .hapticIntensityControl,
-            controlPoints: [
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.15),
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0.14, value: 0.95),
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0.26, value: 0.85),
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.0)
-            ],
-            relativeTime: 0
-        )
-        // Sharpness lifts slightly so the tail reads brighter, not muffled.
-        let sharpnessCurve = CHHapticParameterCurve(
-            parameterID: .hapticSharpnessControl,
-            controlPoints: [
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0, value: 0.2),
-                CHHapticParameterCurve.ControlPoint(relativeTime: 0.45, value: 0.5)
-            ],
-            relativeTime: 0
-        )
-
-        do {
-            try engine.start()
-            let pattern = try CHHapticPattern(
-                events: [swell],
-                parameterCurves: [bellCurve, sharpnessCurve]
-            )
-            let player = try engine.makePlayer(with: pattern)
-            try player.start(atTime: CHHapticTimeImmediate)
-        } catch {
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        // Starting an already-running engine is a cheap no-op, so the callback
+        // fires almost immediately once `prepare()` has run.
+        engine.start { error in
+            guard error == nil else {
+                Task { @MainActor in fallback() }
+                return
+            }
+            do {
+                let player = try engine.makePlayer(with: pattern)
+                try player.start(atTime: CHHapticTimeImmediate)
+            } catch {
+                Task { @MainActor in fallback() }
+            }
         }
     }
 }
@@ -182,6 +254,7 @@ struct ContentView: View {
     @State private var isRealtimeTranscriptPresented = false
     @State private var isHistoryOverviewPresented = false
     @State private var isHistoryDetailPresented = false
+    @State private var selectedHistoryTab: HistoryTab = .sensor
     @State private var interactivePageTransition: InteractivePageTransition?
     @State private var interactivePageDragState = InteractivePageDragState()
     @State private var isInteractivePageSettling = false
@@ -310,6 +383,7 @@ struct ContentView: View {
                     NavigationStack {
                         HistoryOverviewView(
                             database: database,
+                            selectedTab: $selectedHistoryTab,
                             onContinueTextConversation: continueTextConversation,
                             onContinueRealtimeConversation: continueRealtimeConversation,
                             onDetailPresentationChanged: { isPresented in
@@ -523,7 +597,7 @@ struct ContentView: View {
     }
 
     private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 12)
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged { value in
                 updateHorizontalPageDrag(value, pageWidth: pageWidth)
             }
@@ -575,6 +649,14 @@ struct ContentView: View {
         // already begun, keep driving it so it can always settle cleanly.
         guard interactivePageTransition != nil
                 || !isConversationTextSelectionActive else { return }
+
+        // Multi-image bubbles own horizontal drags that begin over their photo
+        // strip. Ignore only a new page transition so an already-started
+        // transition can always finish instead of getting stuck midway.
+        guard interactivePageTransition != nil
+                || !isConversationImageSwipeExcluded(
+                    at: value.startLocation
+                ) else { return }
 
         switch interactivePageTransition {
         case .presentingHistory:
@@ -999,9 +1081,10 @@ struct ContentView: View {
             return
         }
 
-        // Warm up the haptic engine now so the success buzz fires without a
-        // cold-start delay the moment the connection lands.
-        connectionHaptic.prepare()
+        // Acknowledge the tap immediately. This also warms up the haptic engine,
+        // so the Soft Swell fires without a cold-start delay once the connection
+        // lands a moment later.
+        connectionHaptic.playTapConfirmation()
         Task {
             await realtimeConversation.start()
         }
@@ -2135,11 +2218,11 @@ private struct PrimaryInteractionButton: View {
     private var animationActivity: Double {
         switch realtimeConversationState {
         case .connected:
-            1
+            2.5
         case .requestingPermission, .preparingAudio, .connecting:
-            0.62
+            1.62
         case .idle, .error:
-            0.34
+            1.34
         }
     }
 
@@ -2166,9 +2249,16 @@ private struct DiffuseOrb: View {
             let time = isMotionReduced ? 0 : timeline.date.timeIntervalSinceReferenceDate
             let phase = time * (0.34 + 0.28 * activity)
             let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: time)
-            let pulse = accent?.kind == .strongPulse
-                ? accentEnvelope * (0.035 + 0.02 * (accent?.intensity ?? 0))
-                : 0
+            let pulse: Double = switch accent?.kind {
+            case .strongPulse:
+                accentEnvelope * (0.055 + 0.04 * (accent?.intensity ?? 0))
+            // A single decisive swell: roughly triple a speech pulse, so the
+            // moment the model connects is unmistakable without looking glitchy.
+            case .connectionEstablished:
+                accentEnvelope * 0.16
+            default:
+                0
+            }
             let breathing = isMotionReduced ? 0 : min(1, max(0, visualLevel)) * 0.012
 
             if #available(iOS 18.0, *) {
@@ -2199,11 +2289,11 @@ private struct DiffuseOrb: View {
     private func meshColors(accentEnvelope: Double) -> [Color] {
         var softening = [
             0.12, 0.18, 0.3, 0.22,
-            0.25, 0.38, 0.56, 0.32,
-            0.78, 0.62, 0.88, 0.76,
+            0.25, 0.18, 0.36, 0.32,
+            0.78, 0.52, 0.78, 0.76,
             0.9, 0.94, 1, 0.92
         ]
-        if let accent {
+        if let accent, accent.deformsMesh {
             softening[accent.meshPointIndex] = min(
                 1,
                 softening[accent.meshPointIndex] + accentEnvelope * 0.3
@@ -2276,7 +2366,7 @@ private struct DiffuseOrb: View {
             point(0.67 + sin(phase * 0.75) * drift * 0.45, 1),
             point(1, 1)
         ]
-        if let accent {
+        if let accent, accent.deformsMesh {
             points[accent.meshPointIndex] += accent.offset * Float(accentEnvelope)
         }
         return points
@@ -2285,8 +2375,18 @@ private struct DiffuseOrb: View {
     private func accentEnvelope(at time: TimeInterval) -> Double {
         guard let accent else { return 0 }
         let elapsed = max(0, time - accent.startedAt)
-        let attack = accent.kind == .strongPulse ? 0.09 : 0.07
-        let release = accent.kind == .strongPulse ? 0.5 : 0.34
+        // The connection pulse snaps out and back in ~0.4s total: a shorter,
+        // harder envelope than a speech accent so it reads as one event.
+        let attack: Double = switch accent.kind {
+        case .connectionEstablished: 0.11
+        case .strongPulse: 0.09
+        case .colorShift: 0.07
+        }
+        let release: Double = switch accent.kind {
+        case .connectionEstablished: 0.3
+        case .strongPulse: 0.5
+        case .colorShift: 0.34
+        }
 
         if elapsed < attack {
             let progress = elapsed / attack

@@ -3,6 +3,7 @@ import SwiftUI
 private enum VoiceVisualAccentKind: Equatable {
     case strongPulse
     case colorShift
+    case connectionEstablished
 }
 
 private struct VoiceVisualAccent: Equatable {
@@ -12,6 +13,10 @@ private struct VoiceVisualAccent: Equatable {
     let offset: SIMD2<Float>
     let intensity: Double
     let startedAt: TimeInterval
+
+    var deformsMesh: Bool {
+        kind != .connectionEstablished
+    }
 }
 
 // MARK: - 小球调参实验台
@@ -49,6 +54,9 @@ private struct OrbTuning: Equatable {
     var releaseStrong: Double = 0.5
     var attackColor: Double = 0.07        // accentEnvelope colorShift
     var releaseColor: Double = 0.34
+    var connectionPulse: Double = 0.16    // pulse = env*0.16（连接成功，独占缩放）
+    var attackConnection: Double = 0.11   // accentEnvelope connectionEstablished
+    var releaseConnection: Double = 0.3
     var softeningBump: Double = 0.3       // softening[i] + env*0.3
     var shadowOpacity: Double = 0.25      // .shadow(color: tint.opacity(0.25), …)
     var shadowRadius: Double = 0.12       // radius = width*0.12
@@ -83,6 +91,9 @@ private let orbParamGroups: [OrbParamGroup] = [
         OrbParam(title: "强脉冲 release (s)", detail: "accentEnvelope 熄灭时长（(1-p)² 缓慢退去）。strongPulse 为 0.5s，起得稳退得慢。", source: "ContentView.swift:2188", range: 0...2, keyPath: \.releaseStrong),
         OrbParam(title: "色移 attack (s)", detail: "colorShift 的起亮时长 0.07s，比强脉冲更轻快。", source: "ContentView.swift:2187", range: 0...0.5, keyPath: \.attackColor),
         OrbParam(title: "色移 release (s)", detail: "colorShift 的熄灭时长 0.34s。", source: "ContentView.swift:2188", range: 0...2, keyPath: \.releaseColor),
+        OrbParam(title: "连接脉冲缩放", detail: "连接成功专属：pulse = accentEnvelope × 0.16，约为强脉冲的三倍，且不动网格顶点、不加高光，只让整球“噗”地放大再缩回。", source: "ContentView.swift:2168-2179", range: 0...0.5, keyPath: \.connectionPulse),
+        OrbParam(title: "连接脉冲 attack (s)", detail: "connectionEstablished 的起亮时长 0.11s。", source: "ContentView.swift:2303-2307", range: 0...0.5, keyPath: \.attackConnection),
+        OrbParam(title: "连接脉冲 release (s)", detail: "connectionEstablished 的熄灭时长 0.3s，比语音脉冲更短促果断。", source: "ContentView.swift:2308-2312", range: 0...2, keyPath: \.releaseConnection),
         OrbParam(title: "高光混白增量", detail: "脉冲命中的顶点额外混白：softening[i] += accentEnvelope × 0.3。视觉上就是那一处“泛白发亮”。", source: "ContentView.swift:2106-2109", range: 0...1, keyPath: \.softeningBump),
     ]),
     OrbParamGroup(title: "阴影辉光（按钮层）", params: [
@@ -104,9 +115,14 @@ private struct TunableOrb: View {
             let time = timeline.date.timeIntervalSinceReferenceDate
             let phase = time * (tuning.phaseBase + tuning.phaseActivity * tuning.activity)
             let env = accentEnvelope(at: time)
-            let pulse = accent?.kind == .strongPulse
-                ? env * (tuning.pulseBase + tuning.pulseIntensity * (accent?.intensity ?? 0))
-                : 0
+            let pulse: Double = switch accent?.kind {
+            case .strongPulse:
+                env * (tuning.pulseBase + tuning.pulseIntensity * (accent?.intensity ?? 0))
+            case .connectionEstablished:
+                env * tuning.connectionPulse
+            default:
+                0
+            }
             let breathing = min(1, max(0, tuning.visualLevel)) * tuning.breathing
 
             if #available(iOS 18.0, *) {
@@ -130,7 +146,7 @@ private struct TunableOrb: View {
     @available(iOS 18.0, *)
     private func meshColors(env: Double) -> [Color] {
         var soft = softening
-        if let accent {
+        if let accent, accent.deformsMesh {
             soft[accent.meshPointIndex] = min(1, soft[accent.meshPointIndex] + env * tuning.softeningBump)
         }
         return soft.map { tint.mix(with: .white, by: $0, in: .perceptual) }
@@ -139,8 +155,16 @@ private struct TunableOrb: View {
     private func accentEnvelope(at time: TimeInterval) -> Double {
         guard let accent else { return 0 }
         let elapsed = max(0, time - accent.startedAt)
-        let attack = accent.kind == .strongPulse ? tuning.attackStrong : tuning.attackColor
-        let release = accent.kind == .strongPulse ? tuning.releaseStrong : tuning.releaseColor
+        let attack: Double = switch accent.kind {
+        case .connectionEstablished: tuning.attackConnection
+        case .strongPulse: tuning.attackStrong
+        case .colorShift: tuning.attackColor
+        }
+        let release: Double = switch accent.kind {
+        case .connectionEstablished: tuning.releaseConnection
+        case .strongPulse: tuning.releaseStrong
+        case .colorShift: tuning.releaseColor
+        }
         if elapsed < attack {
             let p = elapsed / attack
             return p * p * (3 - 2 * p)
@@ -170,7 +194,7 @@ private struct TunableOrb: View {
             pt(0.67 + sin(phase * 0.75) * drift * 0.45, 1),
             pt(1, 1)
         ]
-        if let accent {
+        if let accent, accent.deformsMesh {
             points[accent.meshPointIndex] += accent.offset * Float(env)
         }
         return points
@@ -228,6 +252,8 @@ struct OrbTuningLab: View {
                         .font(.caption2).buttonStyle(.bordered)
                     Button("强脉冲") { fireAccent(.strongPulse) }
                         .font(.caption2).buttonStyle(.borderedProminent)
+                    Button("连接成功") { fireAccent(.connectionEstablished) }
+                        .font(.caption2).buttonStyle(.borderedProminent).tint(.green)
                 }
                 .padding(.horizontal, 12).padding(.top, 8)
                 Spacer()
@@ -236,6 +262,19 @@ struct OrbTuningLab: View {
     }
 
     private func fireAccent(_ kind: VoiceVisualAccentKind) {
+        // 连接脉冲不动网格，所以顶点与偏移都取固定值（与真机一致）。
+        guard kind != .connectionEstablished else {
+            accent = VoiceVisualAccent(
+                id: UUID(),
+                kind: kind,
+                meshPointIndex: 5,
+                offset: .zero,
+                intensity: 1,
+                startedAt: Date().timeIntervalSinceReferenceDate
+            )
+            return
+        }
+
         let idxs = [5, 6, 9, 10]
         let angle = Double.random(in: 0..<(2 * .pi))
         let base: Float = kind == .strongPulse ? 0.06 : 0.03

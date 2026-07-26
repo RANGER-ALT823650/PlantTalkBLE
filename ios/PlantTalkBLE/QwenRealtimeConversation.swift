@@ -387,7 +387,12 @@ final class QwenRealtimeConversation {
                 boundDeviceID: plantBinding.deviceID
             )
 
-            let configuration = try AISettingsStore.realtimeConfiguration()
+            // Reading the key goes through the Keychain, which blocks. Keep it
+            // off the main actor so the home orb's animation clock keeps ticking.
+            let configuration = try await Task.detached {
+                try AISettingsStore.realtimeConfiguration()
+            }.value
+            guard isCurrentStartAttempt(attemptID) else { return }
             let permissionResult = await requestMicrophonePermission()
             guard isCurrentStartAttempt(attemptID) else { return }
             guard permissionResult != .denied else {
@@ -399,7 +404,7 @@ final class QwenRealtimeConversation {
                 await waitForAudioSystemAfterFirstAuthorization(attemptID: attemptID)
                 guard isCurrentStartAttempt(attemptID) else { return }
             }
-            try audioIO.prepareForRealtimeConversation()
+            try await audioIO.prepareForRealtimeConversation()
             guard isCurrentStartAttempt(attemptID) else { return }
             // Begin capturing before the cold WebSocket handshake finishes.
             // Audio spoken during startup is retained locally and flushed once
@@ -567,6 +572,7 @@ final class QwenRealtimeConversation {
             connectionTimeoutTask?.cancel()
             connectionTimeoutTask = nil
             state = .connected
+            voiceVisualDriver.emitConnectionEstablishedPulse()
             flushPreConnectionAudio()
 
         case "input_audio_buffer.speech_started":
@@ -651,22 +657,22 @@ final class QwenRealtimeConversation {
     private func startAudioIfNeeded() async throws {
         guard !audioStarted else { return }
         do {
-            try startAudioEngine()
+            try await startAudioEngine()
         } catch {
             // The first engine start after the system permission alert can race
             // the audio route becoming available. Tear down the partial graph and
             // retry once after the route has settled.
             audioIO.stop()
             try await Task.sleep(for: .milliseconds(250))
-            try audioIO.prepareForRealtimeConversation()
-            try startAudioEngine()
+            try await audioIO.prepareForRealtimeConversation()
+            try await startAudioEngine()
         }
         audioStarted = true
         scheduleAudioStartupWatchdog()
     }
 
-    private func startAudioEngine() throws {
-        try audioIO.start(
+    private func startAudioEngine() async throws {
+        try await audioIO.start(
             onMicrophonePCM: { [weak self] chunk in
                 Task { @MainActor in
                     self?.handleMicrophoneChunk(chunk)
