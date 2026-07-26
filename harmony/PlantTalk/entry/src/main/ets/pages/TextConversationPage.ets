@@ -1,6 +1,17 @@
 import image from '@ohos.multimedia.image';
+import curves from '@ohos.curves';
 import { ChatBubble, ChatBubbleSide } from '../components/ChatBubble';
 import {
+  AIConfigurationStore,
+  DEFAULT_SYSTEM_PROMPT
+} from '../ai/AIConfigurationStore';
+import { OpenAICompatibleClient } from '../ai/OpenAICompatibleClient';
+import { ConversationRepository } from '../data/ConversationRepository';
+import { RelationalConversationRepository } from '../data/RelationalConversationRepository';
+import { RelationalHistoryRepository } from '../data/RelationalHistoryRepository';
+import {
+  AIConversation,
+  AIConversationKind,
   ChatImageAttachment,
   ChatMessage,
   ChatRole
@@ -9,6 +20,52 @@ import { accentColorFor, accentColorWithAlpha } from '../theme/AppTheme';
 import { DesignTokens } from '../theme/DesignTokens';
 
 const EAGER_TRANSCRIPT_MESSAGE_LIMIT: number = 120;
+
+@Component
+struct ModelThinkingIndicator {
+  @State private activeDot: number = 0;
+  private timer: number | null = null;
+
+  aboutToAppear(): void {
+    this.timer = setInterval(() => {
+      this.getUIContext().animateTo({
+        duration: 180,
+        curve: Curve.EaseInOut
+      }, () => {
+        this.activeDot = (this.activeDot + 1) % 3;
+      });
+    }, 180);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  build() {
+    Row({ space: 6 }) {
+      ForEach([0, 1, 2], (index: number) => {
+        Circle()
+          .width(7)
+          .height(7)
+          .fill($r('app.color.text_secondary'))
+          .scale({
+            x: this.activeDot === index ? 1.0 : 0.65,
+            y: this.activeDot === index ? 1.0 : 0.65
+          })
+          .translate({ y: this.activeDot === index ? -2 : 1 })
+          .opacity(this.activeDot === index ? 1.0 : 0.5)
+      }, (idx: number) => idx.toString())
+    }
+    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .backgroundColor($r('app.color.surface_translucent'))
+    .backgroundBlurStyle(BlurStyle.Thin)
+    .borderRadius(18)
+    .alignSelf(ItemAlign.Start)
+  }
+}
 
 @Component
 struct ConversationAttachmentThumbnail {
@@ -69,9 +126,6 @@ struct ConversationAttachmentThumbnail {
           .objectFit(ImageFit.Cover)
       } else {
         Column({ space: 4 }) {
-          Text('▧')
-            .fontSize(24)
-            .fontColor($r('app.color.text_secondary'))
           Text('图片')
             .fontSize(11)
             .fontColor($r('app.color.text_secondary'))
@@ -90,92 +144,178 @@ struct ConversationAttachmentThumbnail {
 export struct TextConversationPage {
   @StorageLink('appTheme') appTheme: string = 'blue';
 
-  /**
-   * The initial message remains a separate prop so the existing home-to-chat
-   * transition can keep working. Once persistence is wired, pass its stable ID
-   * and timestamp as well as the stored transcript in `messages`.
-   */
-  @Prop initialMessage: string = '';
-  @Prop initialMessageID: string = 'initial-message';
-  @Prop initialMessageDateMs: number = Date.now();
-  @Prop messages: ChatMessage[] = [];
-  @Prop isWaitingForAssistant: boolean = false;
+  @Prop @Watch('onInitialMessageChanged') initialMessage: string = '';
   onBack: () => void = () => {};
   onSend: (message: string) => void = () => {};
+  onImageSwipeExclusionChanged: (excluded: boolean) => void = (_excluded: boolean): void => {};
 
-  /**
-   * The root page should set a local exclusion flag from this callback and
-   * refuse to begin a new page transition while it is true. The callback is
-   * active only while a pointer is down in a multi-image horizontal strip.
-   */
-  onImageSwipeExclusionChanged: (excluded: boolean) => void =
-    (_excluded: boolean): void => {};
-
+  @State private messages: ChatMessage[] = [];
   @State private draft: string = '';
   @State private menuExpanded: boolean = false;
+  @State private isWaitingForAssistant: boolean = false;
+  @State private activeConversation: AIConversation | null = null;
+
+  private repository: ConversationRepository | null = null;
+  private isProcessingInitial: boolean = false;
+
+  aboutToAppear(): void {
+    this.initDatabaseAndLoad();
+  }
 
   aboutToDisappear(): void {
     this.onImageSwipeExclusionChanged(false);
   }
 
+  private async initDatabaseAndLoad(): Promise<void> {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx) {
+      try {
+        const historyRepo = await RelationalHistoryRepository.open(ctx);
+        this.repository = new RelationalConversationRepository(historyRepo.getStore());
+        const conv = await this.repository.getOrCreateDefaultConversation(AIConversationKind.TEXT);
+        this.activeConversation = conv;
+        this.messages = await this.repository.chatMessages(conv.id);
+
+        if (this.initialMessage.trim().length > 0 && !this.isProcessingInitial) {
+          const initText = this.initialMessage;
+          this.initialMessage = '';
+          this.submitMessage(initText);
+        }
+      } catch (err) {
+        console.error('[TextConversationPage] Init DB failed:', JSON.stringify(err));
+      }
+    }
+  }
+
+  private onInitialMessageChanged(): void {
+    if (this.initialMessage.trim().length > 0 && this.repository && this.activeConversation) {
+      const initText = this.initialMessage;
+      this.initialMessage = '';
+      this.submitMessage(initText);
+    }
+  }
+
+  private async submitMessage(text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (trimmed.length === 0 || !this.activeConversation || !this.repository) {
+      return;
+    }
+
+    const convId = this.activeConversation.id;
+    const now = Date.now();
+    const userMsg = new ChatMessage(
+      `${now}-${Math.random().toString(36).substring(2, 7)}`,
+      convId,
+      ChatRole.USER,
+      trimmed,
+      now
+    );
+
+    this.messages = [...this.messages, userMsg];
+    await this.repository.saveChatMessage(userMsg);
+    this.onSend(trimmed);
+
+    // Trigger AI streaming response
+    this.isWaitingForAssistant = true;
+
+    const ctx = this.getUIContext().getHostContext();
+    let baseURL = 'https://api.openai.com/v1';
+    let model = 'gpt-4.1-mini';
+    let systemPrompt = DEFAULT_SYSTEM_PROMPT;
+    let apiKey: string | null = null;
+
+    if (ctx) {
+      try {
+        const settings = AIConfigurationStore.load(ctx);
+        baseURL = settings.chatBaseURL;
+        model = settings.chatModel;
+        systemPrompt = settings.systemPrompt;
+        apiKey = AIConfigurationStore.getChatAPIKey();
+      } catch (_e) {}
+    }
+
+    if (!apiKey || apiKey.trim().length === 0) {
+      this.isWaitingForAssistant = false;
+      const fallbackMsg = new ChatMessage(
+        `${Date.now()}-fallback`,
+        convId,
+        ChatRole.ASSISTANT,
+        '（未配置 AI API Key。请在「设置 → 大模型设置」中配置 API Key 后与我交流。）',
+        Date.now()
+      );
+      this.messages = [...this.messages, fallbackMsg];
+      await this.repository.saveChatMessage(fallbackMsg);
+      return;
+    }
+
+    const assistantMsgId = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    let assistantMsg: ChatMessage | null = null;
+
+    try {
+      await OpenAICompatibleClient.streamChatCompletions({
+        baseURL: baseURL,
+        apiKey: apiKey,
+        model: model,
+        systemPrompt: systemPrompt,
+        messages: this.messages,
+        onDelta: (_chunk: string, fullText: string) => {
+          if (this.isWaitingForAssistant) {
+            this.isWaitingForAssistant = false;
+          }
+          if (!assistantMsg) {
+            assistantMsg = new ChatMessage(
+              assistantMsgId,
+              convId,
+              ChatRole.ASSISTANT,
+              fullText,
+              Date.now()
+            );
+            this.messages = [...this.messages, assistantMsg];
+          } else {
+            assistantMsg.content = fullText;
+            // Force state array trigger for reactive UI update
+            this.messages = [...this.messages.slice(0, -1), assistantMsg];
+          }
+        }
+      });
+
+      if (assistantMsg && this.repository) {
+        await this.repository.saveChatMessage(assistantMsg);
+      }
+    } catch (err) {
+      this.isWaitingForAssistant = false;
+      const errMsgStr = err instanceof Error ? err.message : '与 AI 通信发生异常';
+      const errorMsg = new ChatMessage(
+        `${Date.now()}-err`,
+        convId,
+        ChatRole.ASSISTANT,
+        `（请求失败: ${errMsgStr}）`,
+        Date.now()
+      );
+      this.messages = [...this.messages, errorMsg];
+      if (this.repository) {
+        await this.repository.saveChatMessage(errorMsg);
+      }
+    }
+  }
+
   private submit(): void {
-    const message = this.draft.trim();
-    if (message.length === 0) {
+    const text = this.draft.trim();
+    if (text.length === 0) {
       return;
     }
     this.draft = '';
-    this.onSend(message);
-  }
-
-  private shouldRenderInitialMessage(): boolean {
-    if (this.initialMessage.trim().length === 0) {
-      return false;
-    }
-    return !this.messages.some(
-      (message: ChatMessage): boolean => message.id === this.initialMessageID
-    );
-  }
-
-  private transcriptMessageCount(): number {
-    return this.messages.length + (this.shouldRenderInitialMessage() ? 1 : 0);
-  }
-
-  private hasTranscript(): boolean {
-    return this.transcriptMessageCount() > 0;
-  }
-
-  private waitingForAssistant(): boolean {
-    if (this.isWaitingForAssistant) {
-      return true;
-    }
-    if (this.messages.length > 0) {
-      return this.messages[this.messages.length - 1].role === ChatRole.USER;
-    }
-    return this.shouldRenderInitialMessage();
-  }
-
-  private normalizedTimestamp(timestampMs: number): number {
-    return Number.isFinite(timestampMs) && timestampMs > 0
-      ? timestampMs
-      : Date.now();
+    this.submitMessage(text);
   }
 
   private dayKey(timestampMs: number): string {
-    const date = new Date(this.normalizedTimestamp(timestampMs));
+    const date = new Date(timestampMs > 0 ? timestampMs : Date.now());
     return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
   }
 
   private dateHeader(timestampMs: number): string {
-    const date = new Date(this.normalizedTimestamp(timestampMs));
-    const weekdays: string[] = [
-      '星期日',
-      '星期一',
-      '星期二',
-      '星期三',
-      '星期四',
-      '星期五',
-      '星期六'
-    ];
+    const date = new Date(timestampMs > 0 ? timestampMs : Date.now());
+    const weekdays: string[] = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
     return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${weekdays[date.getDay()]}`;
   }
 
@@ -184,24 +324,13 @@ export struct TextConversationPage {
   }
 
   private timeLabel(timestampMs: number): string {
-    const date = new Date(this.normalizedTimestamp(timestampMs));
+    const date = new Date(timestampMs > 0 ? timestampMs : Date.now());
     return `${this.twoDigits(date.getHours())}:${this.twoDigits(date.getMinutes())}`;
   }
 
-  /**
-   * Mirrors iOS `ConversationDateGrouping`: the first user message of each
-   * local calendar day owns that day's centered header. Assistant/system rows
-   * never consume a day.
-   */
   private firstUserMessageIDs(): string[] {
     const seenDayKeys: string[] = [];
     const result: string[] = [];
-
-    if (this.shouldRenderInitialMessage()) {
-      const initialDay = this.dayKey(this.initialMessageDateMs);
-      seenDayKeys.push(initialDay);
-      result.push(this.initialMessageID);
-    }
 
     this.messages.forEach((message: ChatMessage): void => {
       if (message.role !== ChatRole.USER) {
@@ -231,8 +360,7 @@ export struct TextConversationPage {
   private handleImageStripTouch(event: TouchEvent): void {
     if (event.type === TouchType.Down) {
       this.onImageSwipeExclusionChanged(true);
-    } else if (event.type === TouchType.Up ||
-      event.type === TouchType.Cancel) {
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
       this.onImageSwipeExclusionChanged(false);
     }
   }
@@ -246,9 +374,9 @@ export struct TextConversationPage {
         .fontColor($r('app.color.text_primary'))
       Blank()
       Button() {
-        Text('×')
-          .fontSize(25)
-          .fontColor($r('app.color.danger'))
+        SymbolGlyph($r('sys.symbol.xmark'))
+          .fontSize(20)
+          .fontColor([$r('app.color.danger')])
       }
       .width(DesignTokens.TOUCH_TARGET)
       .height(DesignTokens.TOUCH_TARGET)
@@ -280,7 +408,6 @@ export struct TextConversationPage {
       .fontWeight(FontWeight.Medium)
       .fontColor($r('app.color.text_secondary'))
       .textAlign(TextAlign.Center)
-      .accessibilityText(this.dateHeader(timestampMs))
   }
 
   @Builder
@@ -347,31 +474,13 @@ export struct TextConversationPage {
   }
 
   @Builder
-  private initialMessageRow() {
-    Column({ space: 6 }) {
-      if (this.showsDateHeader(this.initialMessageID)) {
-        this.dateHeaderRow(this.initialMessageDateMs)
-      }
-      ChatBubble({
-        text: this.initialMessage,
-        side: ChatBubbleSide.USER
-      })
-      this.messageTimestamp(
-        this.initialMessageDateMs,
-        ChatBubbleSide.USER
-      )
-    }
-    .width('100%')
-  }
-
-  @Builder
   private messageRow(message: ChatMessage) {
     Column({ space: 6 }) {
       if (this.showsDateHeader(message.id)) {
         this.dateHeaderRow(message.createdAtMs)
       }
 
-      if (message.imageAttachments.length > 0) {
+      if (message.imageAttachments && message.imageAttachments.length > 0) {
         this.attachmentStrip(
           message.imageAttachments,
           this.sideFor(message.role)
@@ -394,91 +503,54 @@ export struct TextConversationPage {
   }
 
   @Builder
-  private thinkingRow() {
-    Row({ space: 5 }) {
-      Circle().width(7).height(7).fill('#80000000')
-      Circle().width(7).height(7).fill('#52000000')
-      Circle().width(7).height(7).fill('#33000000')
-    }
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-    .backgroundColor($r('app.color.surface_translucent'))
-    .borderRadius(18)
-    .alignSelf(ItemAlign.Start)
-  }
+  private conversation() {
+    if (this.messages.length === 0 && !this.isWaitingForAssistant) {
+      Scroll() {
+        this.emptyTranscript()
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+    } else if (this.messages.length <= EAGER_TRANSCRIPT_MESSAGE_LIMIT) {
+      Scroll() {
+        Column({ space: 12 }) {
+          ForEach(
+            this.messages,
+            (message: ChatMessage) => {
+              this.messageRow(message)
+            },
+            (message: ChatMessage): string => message.id
+          )
 
-  @Builder
-  private eagerTranscript() {
-    Scroll() {
-      Column({ space: 12 }) {
-        if (this.shouldRenderInitialMessage()) {
-          this.initialMessageRow()
+          if (this.isWaitingForAssistant) {
+            ModelThinkingIndicator()
+          }
         }
-
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 12, bottom: 20 })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+    } else {
+      List({ space: 12 }) {
         ForEach(
           this.messages,
           (message: ChatMessage) => {
-            if (message.id !== this.initialMessageID) {
+            ListItem() {
               this.messageRow(message)
             }
           },
           (message: ChatMessage): string => message.id
         )
 
-        if (this.waitingForAssistant()) {
-          this.thinkingRow()
-        }
-      }
-      .width('100%')
-      .padding({ left: 14, right: 14, top: 12, bottom: 20 })
-    }
-    .layoutWeight(1)
-    .scrollBar(BarState.Off)
-  }
-
-  @Builder
-  private lazyTranscript() {
-    List({ space: 12 }) {
-      if (this.shouldRenderInitialMessage()) {
-        ListItem() {
-          this.initialMessageRow()
-        }
-      }
-
-      ForEach(
-        this.messages,
-        (message: ChatMessage) => {
-          if (message.id !== this.initialMessageID) {
-            ListItem() {
-              this.messageRow(message)
-            }
+        if (this.isWaitingForAssistant) {
+          ListItem() {
+            ModelThinkingIndicator()
           }
-        },
-        (message: ChatMessage): string => message.id
-      )
-
-      if (this.waitingForAssistant()) {
-        ListItem() {
-          this.thinkingRow()
         }
-      }
-    }
-    .layoutWeight(1)
-    .scrollBar(BarState.Off)
-    .padding({ left: 14, right: 14, top: 12, bottom: 20 })
-  }
-
-  @Builder
-  private conversation() {
-    if (!this.hasTranscript()) {
-      Scroll() {
-        this.emptyTranscript()
       }
       .layoutWeight(1)
       .scrollBar(BarState.Off)
-    } else if (this.transcriptMessageCount() <= EAGER_TRANSCRIPT_MESSAGE_LIMIT) {
-      this.eagerTranscript()
-    } else {
-      this.lazyTranscript()
+      .padding({ left: 14, right: 14, top: 12, bottom: 20 })
     }
   }
 
@@ -521,10 +593,11 @@ export struct TextConversationPage {
         .height(46)
         .borderRadius(23)
         .backgroundColor($r('app.color.surface_translucent'))
+        .backgroundBlurStyle(BlurStyle.Thin)
         .onClick(() => {
           this.getUIContext().animateTo({
             duration: 420,
-            curve: Curve.EaseInOut
+            curve: curves.springMotion(0.42, 0.82)
           }, () => {
             this.menuExpanded = !this.menuExpanded;
           });
@@ -538,6 +611,7 @@ export struct TextConversationPage {
           .maxLines(5)
           .padding({ left: 16, right: 16, top: 9, bottom: 9 })
           .backgroundColor($r('app.color.surface_translucent'))
+          .backgroundBlurStyle(BlurStyle.Thin)
           .borderRadius(22)
           .border({ width: 1, color: $r('app.color.separator') })
           .onChange((value: string) => {
@@ -545,10 +619,9 @@ export struct TextConversationPage {
           })
 
         Button() {
-          Text('↑')
+          SymbolGlyph($r('sys.symbol.arrow_up'))
             .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
+            .fontColor([Color.White])
         }
         .width(46)
         .height(46)

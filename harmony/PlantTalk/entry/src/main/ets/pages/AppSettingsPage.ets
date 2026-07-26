@@ -1,11 +1,37 @@
 import { APP_THEME_OPTIONS, AppThemeOption } from '../theme/AppTheme';
 import { DesignTokens } from '../theme/DesignTokens';
 
+import { preferences } from '@kit.ArkData';
+
 @Entry
 @Component
 struct AppSettingsPage {
   @StorageLink('appTheme') appTheme: string = 'blue';
   @StorageLink('reduceMotion') reduceMotion: boolean = false;
+
+  private saveTheme(optionId: string): void {
+    this.appTheme = optionId;
+    try {
+      const ctx = this.getUIContext().getHostContext();
+      if (ctx) {
+        const prefs = preferences.getPreferencesSync(ctx, { name: 'plant-talk-general-settings' });
+        prefs.putSync('appTheme', optionId);
+        prefs.flush();
+      }
+    } catch (_e) {}
+  }
+
+  private saveReduceMotion(reduce: boolean): void {
+    this.reduceMotion = reduce;
+    try {
+      const ctx = this.getUIContext().getHostContext();
+      if (ctx) {
+        const prefs = preferences.getPreferencesSync(ctx, { name: 'plant-talk-general-settings' });
+        prefs.putSync('reduceMotion', reduce);
+        prefs.flush();
+      }
+    } catch (_e) {}
+  }
 
   private goBack(): void {
     this.getUIContext().getRouter().back();
@@ -64,7 +90,7 @@ struct AppSettingsPage {
     .height(48)
     .width('100%')
     .onClick(() => {
-      this.appTheme = option.id;
+      this.saveTheme(option.id);
     })
   }
 
@@ -107,7 +133,7 @@ struct AppSettingsPage {
               isOn: this.reduceMotion
             })
               .onChange((isOn: boolean) => {
-                this.reduceMotion = isOn;
+                this.saveReduceMotion(isOn);
               })
           }
           .width('100%')

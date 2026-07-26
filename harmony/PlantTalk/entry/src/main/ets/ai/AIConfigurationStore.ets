@@ -111,6 +111,10 @@ export class AIConfigurationStore {
     return AIConfigurationStore.readSecret(CHAT_API_KEY_ALIAS) !== null;
   }
 
+  static getChatAPIKey(): string | null {
+    return AIConfigurationStore.readSecret(CHAT_API_KEY_ALIAS);
+  }
+
   static hasRealtimeAPIKey(): boolean {
     return AIConfigurationStore.readSecret(REALTIME_API_KEY_ALIAS) !== null;
   }

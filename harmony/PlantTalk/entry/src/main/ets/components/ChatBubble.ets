@@ -31,13 +31,22 @@ export struct ChatBubble {
             ? accentColorFor(this.appTheme)
             : $r('app.color.surface_translucent')
         )
+        .backgroundBlurStyle(
+          this.side === ChatBubbleSide.USER
+            ? BlurStyle.NONE
+            : BlurStyle.Thin
+        )
         .border({
           width: 0.5,
           color: this.side === ChatBubbleSide.USER
             ? accentColorFor(this.appTheme)
             : $r('app.color.separator')
         })
-        .borderRadius(18)
+        .borderRadius(
+          this.side === ChatBubbleSide.USER
+            ? { topLeft: 18, topRight: 18, bottomLeft: 18, bottomRight: 4 }
+            : { topLeft: 18, topRight: 18, bottomLeft: 4, bottomRight: 18 }
+        )
         .constraintSize({ maxWidth: '82%' })
 
       if (this.side === ChatBubbleSide.ASSISTANT) {
