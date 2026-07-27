@@ -42,6 +42,12 @@ struct AppSettingsView: View {
                 } label: {
                     Label("大模型设置", systemImage: "cpu")
                 }
+
+                NavigationLink {
+                    CloudSyncSettingsView(database: database)
+                } label: {
+                    Label("云同步设置", systemImage: "cloud")
+                }
             }
 
             Section {
@@ -682,6 +688,77 @@ struct AISettingsView: View {
     private func showStatus(_ message: String) {
         statusMessage = message
         isShowingStatus = true
+    }
+}
+
+struct CloudSyncSettingsView: View {
+    let database: PlantDatabase
+    @AppStorage("plant_talk_cloud_sync_url") private var syncURL: String = ""
+    @AppStorage("plant_talk_cloud_sync_token") private var syncToken: String = ""
+    @StateObject private var syncService = CloudSyncService.shared
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("https://<FC域名>.fcapp.run", text: $syncURL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            } header: {
+                Text("阿里云 FC 函数公网 URL")
+            } footer: {
+                Text("在函数计算 FC 3.0 控制台的【触发器管理】中复制 HTTP 触发器的公网 URL。")
+            }
+
+            Section {
+                SecureField("鉴权密钥 (x-auth-token)", text: $syncToken)
+            } header: {
+                Text("同步密钥")
+            } footer: {
+                Text("如果在 FC 环境变量中配置了 AUTH_TOKEN，请在此填写对应的密钥。")
+            }
+
+            Section {
+                Button {
+                    Task {
+                        await syncService.sync(database: database)
+                    }
+                } label: {
+                    HStack {
+                        Label(syncService.isSyncing ? "正在同步…" : "立即同步消息", systemImage: "arrow.triangle.2.circlepath")
+                        if syncService.isSyncing {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(syncURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncService.isSyncing)
+
+                if let lastSyncedAt = syncService.lastSyncedAt {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("上次同步成功")
+                            Spacer()
+                            Text(lastSyncedAt.formatted(date: .abbreviated, time: .shortened))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let summary = syncService.lastSyncSummary {
+                            Text(summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption)
+                }
+
+                if let lastError = syncService.lastError {
+                    Text("同步失败: \(lastError)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("云同步设置")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

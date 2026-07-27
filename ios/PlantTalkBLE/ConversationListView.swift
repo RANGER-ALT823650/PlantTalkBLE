@@ -16,11 +16,18 @@ struct ConversationListView: View {
             if isLoading {
                 ProgressView("正在读取会话…")
             } else if conversations.isEmpty {
-                ContentUnavailableView(
-                    "还没有文字对话记录",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text(errorMessage ?? "在主页面展开植物状态后，通过顶部输入框开始对话。")
-                )
+                ScrollView {
+                    ContentUnavailableView(
+                        "还没有文字对话记录",
+                        systemImage: "bubble.left.and.bubble.right",
+                        description: Text(errorMessage ?? "在主页面展开植物状态后，通过顶部输入框开始对话。")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 400)
+                }
+                .refreshable {
+                    await CloudSyncService.shared.sync(database: database)
+                    await loadConversations()
+                }
             } else {
                 List {
                     ForEach(conversations) { conversation in
@@ -50,12 +57,23 @@ struct ConversationListView: View {
                     }
                 }
                 .refreshable {
+                    await CloudSyncService.shared.sync(database: database)
                     await loadConversations()
                 }
             }
         }
         .task {
             await loadConversations()
+        }
+        .onAppear {
+            Task {
+                await loadConversations()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CloudSyncDidComplete"))) { _ in
+            Task {
+                await loadConversations()
+            }
         }
         .confirmationDialog(
             "删除这条文字会话？",

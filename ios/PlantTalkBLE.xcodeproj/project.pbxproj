@@ -33,6 +33,7 @@
 		9358ABC597AD97A477630834 /* summary.md in Resources */ = {isa = PBXBuildFile; fileRef = F82B11E7789415F8CDA49B9A /* summary.md */; };
 		95E1B6D5BD3905EC551A3670 /* gpt-live-image-interaction.wav in Resources */ = {isa = PBXBuildFile; fileRef = C773F75623B0EEE409BA3DD0 /* gpt-live-image-interaction.wav */; };
 		97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05099F394FC182A10A30211A /* PlantDatabase.swift */; };
+		88261A6E27E1CD119898F888 /* CloudSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99261A6E27E1CD119898F999 /* CloudSyncService.swift */; };
 		98D0641588A37B4F25B02EAF /* OrbTuningLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 216A59E7B4747A12B2479A7F /* OrbTuningLabApp.swift */; };
 		9CF131CC932C90E8C1780D6D /* ZoomableImagePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56453E86C81122FE81CB1E1 /* ZoomableImagePreview.swift */; };
 		9DADBE01E160ACA43D3B14B4 /* PlantImageGenerationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */; };
@@ -69,6 +70,7 @@
 
 /* Begin PBXFileReference section */
 		05099F394FC182A10A30211A /* PlantDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantDatabase.swift; sourceTree = "<group>"; };
+		99261A6E27E1CD119898F999 /* CloudSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncService.swift; sourceTree = "<group>"; };
 		057D364A8D71562A5CC4CD19 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		06BECAAB78A06B92CFBF27E4 /* RealtimeConversationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeConversationSheet.swift; sourceTree = "<group>"; };
 		0ABA8E0ED4DD1089EC0F2BDE /* PlantArtworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantArtworkView.swift; sourceTree = "<group>"; };
@@ -153,6 +155,7 @@
 				724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */,
 				BB5BCA89F7B2BCC5283EE7D1 /* PlantConversationBinding.swift */,
 				05099F394FC182A10A30211A /* PlantDatabase.swift */,
+				99261A6E27E1CD119898F999 /* CloudSyncService.swift */,
 				B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */,
 				A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */,
 				1A9FC1D3529DE15855CD2692 /* PlantMemory.swift */,
@@ -396,6 +399,7 @@
 				DD099718F31A1285A41F6399 /* PlantConversationBinding.swift in Sources */,
 				753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */,
 				97261A6E27E1CD119898F13C /* PlantDatabase.swift in Sources */,
+				88261A6E27E1CD119898F888 /* CloudSyncService.swift in Sources */,
 				9DADBE01E160ACA43D3B14B4 /* PlantImageGenerationClient.swift in Sources */,
 				E16609BD95D4F86AA9A009DA /* PlantMemory.swift in Sources */,
 				2F1BF0B32E4F67C8D497A7B5 /* PlantReading.swift in Sources */,

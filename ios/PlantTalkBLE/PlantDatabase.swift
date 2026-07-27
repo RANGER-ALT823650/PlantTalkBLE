@@ -523,6 +523,94 @@ actor PlantDatabase {
         return conversation
     }
 
+    func ensureConversation(
+        id: UUID,
+        kind: AIConversationKind = .text,
+        defaultTitle: String = "云端对话",
+        createdAt: Date = Date()
+    ) async throws -> AIConversation {
+        try await writer.write { db in
+            let existingRow = try Row.fetchOne(
+                db,
+                sql: "SELECT id, title, kind, created_at, updated_at FROM ai_conversations WHERE id = ?",
+                arguments: [id.uuidString]
+            )
+            if let existingRow, let conv = Self.makeConversation(existingRow) {
+                if conv.kind == .text && kind == .realtime {
+                    try db.execute(
+                        sql: "UPDATE ai_conversations SET kind = ? WHERE id = ?",
+                        arguments: [kind.rawValue, id.uuidString]
+                    )
+                    return AIConversation(id: conv.id, title: conv.title, kind: .realtime, createdAt: conv.createdAt, updatedAt: conv.updatedAt)
+                }
+                return conv
+            }
+            let conversation = AIConversation(
+                id: id,
+                title: defaultTitle,
+                kind: kind,
+                createdAt: createdAt,
+                updatedAt: createdAt
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO ai_conversations (id, title, kind, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    conversation.id.uuidString,
+                    conversation.title,
+                    conversation.kind.rawValue,
+                    conversation.createdAt,
+                    conversation.updatedAt
+                ]
+            )
+            return conversation
+        }
+    }
+
+    func insertMessageIfNotExist(
+        id: UUID,
+        conversationID: UUID,
+        role: ChatRole,
+        content: String,
+        createdAt: Date
+    ) async throws {
+        try await writer.write { db in
+            let count = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM ai_messages WHERE id = ?",
+                arguments: [id.uuidString]
+            ) ?? 0
+            if count == 0 {
+                try db.execute(
+                    sql: """
+                        INSERT INTO ai_messages (id, conversation_id, role, content, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        id.uuidString,
+                        conversationID.uuidString,
+                        role.rawValue,
+                        content,
+                        createdAt
+                    ]
+                )
+                try db.execute(
+                    sql: """
+                        INSERT INTO ai_memory_message_sequences (message_id)
+                        VALUES (?)
+                        """,
+                    arguments: [id.uuidString]
+                )
+                try db.execute(
+                    sql: "UPDATE ai_conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?",
+                    arguments: [createdAt, conversationID.uuidString]
+                )
+            }
+        }
+    }
+
     func allConversations(kind: AIConversationKind? = nil) async throws -> [AIConversation] {
         try await writer.read { db in
             let rows: [Row]
@@ -1222,10 +1310,12 @@ actor PlantDatabase {
     private static func makeConversation(_ row: Row) -> AIConversation? {
         let idText: String = row["id"]
         guard let id = UUID(uuidString: idText) else { return nil }
+        let rawKind: String = row["kind"]
+        let kind: AIConversationKind = (rawKind == "realtime" || rawKind == "voice") ? .realtime : .text
         return AIConversation(
             id: id,
             title: row["title"],
-            kind: AIConversationKind(rawValue: row["kind"]) ?? .text,
+            kind: kind,
             createdAt: row["created_at"],
             updatedAt: row["updated_at"]
         )

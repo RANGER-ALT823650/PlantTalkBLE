@@ -555,14 +555,15 @@ struct TextConversationView: View {
             .overlay(alignment: .top) {
                 if isWaitingForFirstToken, assistantPresentation.isOpen {
                     ModelThinkingIndicator()
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 2)
+                        .offset(y: -44)
                         .transition(thinkingTransition)
                 }
             }
             .overlay(alignment: .topLeading) {
                 topLeadingBackButton
                     .padding(.leading, 16)
-                    .offset(y: -14)
+                    .offset(y: -44)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in

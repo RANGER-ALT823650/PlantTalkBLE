@@ -16,11 +16,18 @@ struct RealtimeConversationHistoryView: View {
             if isLoading {
                 ProgressView("正在读取实时语音记录…")
             } else if conversations.isEmpty {
-                ContentUnavailableView(
-                    "暂无实时语音记录",
-                    systemImage: "waveform",
-                    description: Text(errorMessage ?? "从主页面点按圆形按钮开始实时语音对话。")
-                )
+                ScrollView {
+                    ContentUnavailableView(
+                        "暂无实时语音记录",
+                        systemImage: "waveform",
+                        description: Text(errorMessage ?? "从主页面点按圆形按钮开始实时语音对话。")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 400)
+                }
+                .refreshable {
+                    await CloudSyncService.shared.sync(database: database)
+                    await loadConversations()
+                }
             } else {
                 List {
                     ForEach(conversations) { conversation in
@@ -50,12 +57,23 @@ struct RealtimeConversationHistoryView: View {
                     }
                 }
                 .refreshable {
+                    await CloudSyncService.shared.sync(database: database)
                     await loadConversations()
                 }
             }
         }
         .task {
             await loadConversations()
+        }
+        .onAppear {
+            Task {
+                await loadConversations()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CloudSyncDidComplete"))) { _ in
+            Task {
+                await loadConversations()
+            }
         }
         .confirmationDialog(
             "删除这条实时语音会话？",
