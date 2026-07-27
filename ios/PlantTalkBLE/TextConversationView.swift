@@ -559,6 +559,11 @@ struct TextConversationView: View {
                         .transition(thinkingTransition)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                topLeadingBackButton
+                    .padding(.leading, 16)
+                    .offset(y: -14)
+            }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in
                 handleMessageCountChange(proxy: proxy)
@@ -1172,6 +1177,31 @@ struct TextConversationView: View {
                     ? ConversationMotion.hiddenComposerOffset
                     : 0
             )
+    }
+
+    @ViewBuilder
+    private var topLeadingBackButton: some View {
+        if #available(iOS 26, *) {
+            Button(action: onHome) {
+                Image(systemName: "chevron.backward")
+                    .font(.headline)
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .accessibilityLabel("返回")
+        } else {
+            Button(action: onHome) {
+                Image(systemName: "chevron.backward")
+                    .font(.headline)
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .accessibilityLabel("返回")
+        }
     }
 
     @ViewBuilder
