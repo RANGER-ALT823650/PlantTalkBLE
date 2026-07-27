@@ -387,7 +387,17 @@ final class PlantDataToolExecutor {
         _ call: AIModelToolCall,
         executedAt: Date
     ) async throws -> ToolInvocation {
-        let reading = try await immediateReadingRequester()
+        var reading: PlantReading?
+        var source = "on_demand_bluetooth"
+        do {
+            reading = try await immediateReadingRequester()
+        } catch {
+            reading = try? await requestRemoteCloudSampling()
+            source = "on_demand_cloud_remote_scheme_a"
+        }
+        guard let reading = reading else {
+            throw PlantToolExecutionError.invalidArguments("蓝牙未连接且远程采样超时")
+        }
         return makeInvocation(
             providerCallID: call.id,
             toolName: call.function.name,
@@ -395,7 +405,7 @@ final class PlantDataToolExecutor {
             argumentsJSON: call.function.arguments,
             payload: [
                 "status": "ok",
-                "source": "on_demand_bluetooth",
+                "source": source,
                 "acquisition": "manual_extra_sample",
                 "sampling_schedule": "unchanged_five_minute_cadence",
                 "history_recording": "firmware_appends_extra_sample",
@@ -409,6 +419,61 @@ final class PlantDataToolExecutor {
             ],
             executedAt: executedAt
         )
+    }
+
+    private func requestRemoteCloudSampling() async throws -> PlantReading {
+        guard let syncURLString = UserDefaults.standard.string(forKey: "plant_talk_cloud_sync_url"),
+              let syncURL = URL(string: syncURLString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw NSError(domain: "CloudSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "未配置云同步 URL"])
+        }
+        let token = UserDefaults.standard.string(forKey: "plant_talk_cloud_sync_token") ?? ""
+        let deviceID = deviceIDProvider() ?? "default_device"
+
+        let createURL = syncURL.appendingPathComponent("command/create")
+        var req = URLRequest(url: createURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "x-auth-token") }
+        let body = ["action": "refresh_sensor", "deviceId": deviceID]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (createData, _) = try await URLSession.shared.data(for: req)
+        let createObj = (try? JSONSerialization.jsonObject(with: createData) as? [String: Any]) ?? [:]
+        guard let commandID = (createObj["commandId"] ?? createObj["command_id"]) as? String, !commandID.isEmpty else {
+            throw NSError(domain: "CloudSync", code: -2, userInfo: [NSLocalizedDescriptionKey: "远程采样命令创建失败"])
+        }
+
+        let statusBaseURL = syncURL.appendingPathComponent("command/status")
+        let startTime = Date()
+        while Date().timeIntervalSince(startTime) < 8.0 {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            var statusComp = URLComponents(url: statusBaseURL, resolvingAgainstBaseURL: true)
+            statusComp?.queryItems = [URLQueryItem(name: "commandId", value: commandID)]
+            guard let statusURL = statusComp?.url else { continue }
+
+            var sReq = URLRequest(url: statusURL)
+            sReq.httpMethod = "GET"
+            if !token.isEmpty { sReq.setValue(token, forHTTPHeaderField: "x-auth-token") }
+            if let (sData, _) = try? await URLSession.shared.data(for: sReq),
+               let sObj = try? JSONSerialization.jsonObject(with: sData) as? [String: Any],
+               (sObj["status"] as? String) == "completed",
+               let readingDict = sObj["reading"] as? [String: Any] {
+                let recAtMs = (readingDict["recordedAt"] as? Double) ?? (readingDict["recorded_at"] as? Double) ?? Date().timeIntervalSince1970 * 1000
+                let soil = (readingDict["soilRaw"] as? Int) ?? (readingDict["soil_raw"] as? Int) ?? 0
+                let temp = (readingDict["temperature"] as? Double).map { Float($0) }
+                let hum = (readingDict["humidity"] as? Double).map { Float($0) }
+                let light = ((readingDict["lightLux"] as? Double) ?? (readingDict["light_lux"] as? Double)).map { Float($0) }
+
+                return PlantReading(
+                    temperature: temp,
+                    humidity: hum,
+                    soilRaw: UInt16(clamping: soil),
+                    lightLux: light,
+                    receivedAt: Date(timeIntervalSince1970: recAtMs / 1000.0)
+                )
+            }
+        }
+        throw NSError(domain: "CloudSync", code: -3, userInfo: [NSLocalizedDescriptionKey: "远程采样超时"])
     }
 
     private func executeLatestHistoricalReading(

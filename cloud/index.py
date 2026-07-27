@@ -40,6 +40,7 @@ TABLE_MESSAGES = 'messages'
 # 墓碑表。主键 (entity_type, entity_id)，entity_type 取 'conversation' | 'message'
 TABLE_DELETIONS = 'deletions'
 TABLE_SENSOR_READINGS = 'sensor_readings'
+TABLE_COMMANDS = 'commands'
 
 ENTITY_CONVERSATION = 'conversation'
 ENTITY_MESSAGE = 'message'
@@ -501,6 +502,147 @@ def handle_pull(client, query_params):
     return result
 
 
+def handle_create_command(client, body_data):
+    device_id = as_text(body_data.get('deviceId') or body_data.get('device_id') or 'default_device').strip()
+    action = as_text(body_data.get('action') or 'refresh_sensor').strip()
+    now_ms = int(time.time() * 1000)
+    command_id = f"cmd_{now_ms}_{int(time.time() * 1000) % 1000}"
+
+    row = (
+        [('command_id', command_id)],
+        [
+            ('device_id', device_id),
+            ('action', action),
+            ('status', 'pending'),
+            ('created_at', now_ms),
+            ('result_reading', '')
+        ]
+    )
+    try:
+        write_rows(client, TABLE_COMMANDS, [row])
+    except Exception as error:
+        if is_table_missing(error):
+            return {'success': False, 'error': f"表 '{TABLE_COMMANDS}' 不存在，请在 Tablestore 控制台创建。"}
+        raise
+
+    return {
+        'success': True,
+        'commandId': command_id,
+        'command_id': command_id,
+        'status': 'pending',
+        'createdAt': now_ms
+    }
+
+
+def handle_poll_command(client, query_params):
+    device_id = as_text(query_params.get('deviceId') or query_params.get('device_id') or 'default_device').strip()
+    try:
+        for row in iter_range(
+            client,
+            TABLE_COMMANDS,
+            [('command_id', INF_MIN)],
+            [('command_id', INF_MAX)]
+        ):
+            cmd_id = row.primary_key[0][1]
+            attrs = extract_attrs(row)
+            if attrs.get('status') == 'pending':
+                target_dev = as_text(attrs.get('device_id'))
+                if not target_dev or target_dev == device_id or device_id == 'default_device':
+                    return {
+                        'success': True,
+                        'hasCommand': True,
+                        'commandId': cmd_id,
+                        'command_id': cmd_id,
+                        'action': as_text(attrs.get('action'), 'refresh_sensor')
+                    }
+    except Exception as error:
+        if is_table_missing(error):
+            return {'success': True, 'hasCommand': False}
+        raise
+
+    return {'success': True, 'hasCommand': False}
+
+
+def handle_respond_command(client, body_data):
+    command_id = as_text(body_data.get('commandId') or body_data.get('command_id')).strip()
+    if not command_id:
+        return {'success': False, 'error': '缺失 commandId'}
+    
+    now_ms = int(time.time() * 1000)
+    reading = body_data.get('reading') or body_data.get('sensorReading') or {}
+    reading_json = json.dumps(reading)
+
+    row = (
+        [('command_id', command_id)],
+        [
+            ('status', 'completed'),
+            ('updated_at', now_ms),
+            ('result_reading', reading_json)
+        ]
+    )
+    try:
+        write_rows(client, TABLE_COMMANDS, [row])
+    except Exception as error:
+        if not is_table_missing(error):
+            raise
+
+    if isinstance(reading, dict) and reading:
+        try:
+            device_id = as_text(reading.get('deviceId') or reading.get('device_id') or 'default_device')
+            seq = as_int(reading.get('sequence'), now_ms // 1000)
+            rec_at = as_int(reading.get('recordedAt') or reading.get('recorded_at'), now_ms)
+            soil = as_int(reading.get('soilRaw') or reading.get('soil_raw'), 0)
+            temp = reading.get('temperature')
+            hum = reading.get('humidity')
+            light = reading.get('lightLux') if reading.get('lightLux') is not None else reading.get('light_lux')
+            
+            attrs = [
+                ('recorded_at', rec_at),
+                ('received_at', now_ms),
+                ('timestamp_estimated', False),
+                ('soil_raw', soil)
+            ]
+            if temp is not None: attrs.append(('temperature', float(temp)))
+            if hum is not None: attrs.append(('humidity', float(hum)))
+            if light is not None: attrs.append(('light_lux', float(light)))
+            
+            write_rows(client, TABLE_SENSOR_READINGS, [([('device_id', device_id), ('sequence', seq)], attrs)])
+        except Exception:
+            pass
+
+    return {'success': True, 'commandId': command_id, 'status': 'completed'}
+
+
+def handle_get_command_status(client, query_params):
+    command_id = as_text(query_params.get('commandId') or query_params.get('command_id')).strip()
+    if not command_id:
+        return {'success': False, 'error': '缺失 commandId'}
+
+    try:
+        rows = list(iter_range(
+            client,
+            TABLE_COMMANDS,
+            [('command_id', command_id)],
+            [('command_id', command_id)]
+        ))
+        if rows:
+            attrs = extract_attrs(rows[0])
+            status = as_text(attrs.get('status'), 'pending')
+            result_json = as_text(attrs.get('result_reading'))
+            reading = json.loads(result_json) if result_json else None
+            return {
+                'success': True,
+                'commandId': command_id,
+                'status': status,
+                'reading': reading
+            }
+    except Exception as error:
+        if not is_table_missing(error):
+            raise
+
+    return {'success': False, 'error': '未找到对应指令', 'status': 'not_found'}
+
+
 def main_logic(method, path, headers, query_params, body_data):
     """
     核心业务逻辑
@@ -528,16 +670,28 @@ def main_logic(method, path, headers, query_params, body_data):
     clean_path = path.rstrip('/')
 
     if method == 'POST':
+        if clean_path in ('/command/create', '/commands/create') or body_data.get('action') == 'create_command':
+            return 200, cors_headers, handle_create_command(client, body_data)
+        if clean_path in ('/command/respond', '/commands/respond') or 'commandId' in body_data and 'reading' in body_data:
+            return 200, cors_headers, handle_respond_command(client, body_data)
+
         is_push = (
             clean_path in ('/sync/push', '/messages', '/push', '', '/') or
             'conversations' in body_data or
             'messages' in body_data or
-            'deletions' in body_data
+            'deletions' in body_data or
+            'sensorReadings' in body_data or
+            'sensor_readings' in body_data
         )
         if is_push:
             return 200, cors_headers, handle_push(client, body_data)
 
     if method == 'GET':
+        if clean_path in ('/command/poll', '/commands/poll'):
+            return 200, cors_headers, handle_poll_command(client, query_params)
+        if clean_path in ('/command/status', '/commands/status') or ('commandId' in query_params or 'command_id' in query_params):
+            return 200, cors_headers, handle_get_command_status(client, query_params)
+
         is_pull = (
             clean_path in ('/sync/pull', '/messages', '/pull', '', '/') or
             'since' in query_params
