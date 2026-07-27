@@ -32,6 +32,18 @@ struct HistoryReading: Equatable, Sendable {
     }
 }
 
+struct SyncSensorReading: Codable, Equatable, Sendable {
+    let deviceId: String
+    let sequence: Int64
+    let recordedAt: Int64
+    let receivedAt: Int64?
+    let timestampEstimated: Bool?
+    let soilRaw: Int
+    let temperature: Double?
+    let humidity: Double?
+    let lightLux: Double?
+}
+
 struct HistorySaveResult: Equatable, Sendable {
     let receivedCount: Int
     let insertedCount: Int
@@ -828,10 +840,21 @@ actor PlantDatabase {
         messageIDs: [UUID]
     ) async throws -> Bool {
         try await writer.write { db in
+            let now = Date()
             for messageID in Set(messageIDs) {
                 try db.execute(
                     sql: "DELETE FROM ai_messages WHERE id = ? AND conversation_id = ?",
                     arguments: [messageID.uuidString, conversationID.uuidString]
+                )
+                // The turn may already be on the cloud; tombstone it so a later
+                // pull cannot bring it back.
+                try Self.recordTombstone(
+                    db,
+                    entityType: SyncTombstone.EntityType.message.rawValue,
+                    entityID: messageID.uuidString,
+                    conversationID: conversationID.uuidString,
+                    deletedAt: now,
+                    pendingPush: true
                 )
             }
 
@@ -844,6 +867,14 @@ actor PlantDatabase {
                 try db.execute(
                     sql: "DELETE FROM ai_conversations WHERE id = ?",
                     arguments: [conversationID.uuidString]
+                )
+                try Self.recordTombstone(
+                    db,
+                    entityType: SyncTombstone.EntityType.conversation.rawValue,
+                    entityID: conversationID.uuidString,
+                    conversationID: nil,
+                    deletedAt: now,
+                    pendingPush: true
                 )
                 return true
             }
@@ -861,6 +892,14 @@ actor PlantDatabase {
             try db.execute(
                 sql: "DELETE FROM ai_conversations WHERE id = ?",
                 arguments: [id.uuidString]
+            )
+            try Self.recordTombstone(
+                db,
+                entityType: SyncTombstone.EntityType.conversation.rawValue,
+                entityID: id.uuidString,
+                conversationID: nil,
+                deletedAt: Date(),
+                pendingPush: true
             )
         }
     }
@@ -884,13 +923,238 @@ actor PlantDatabase {
         }
     }
 
+    func allSensorReadingsForSync() async throws -> [SyncSensorReading] {
+        try await writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT device_id, sequence, recorded_at, received_at,
+                           timestamp_estimated, soil_raw, temperature, humidity, light_lux
+                    FROM sensor_readings
+                    ORDER BY recorded_at ASC
+                    LIMIT 5000
+                    """
+            )
+            return rows.map { row in
+                let recDate: Date = row["recorded_at"]
+                let rcvDate: Date? = row["received_at"]
+                return SyncSensorReading(
+                    deviceId: row["device_id"],
+                    sequence: row["sequence"],
+                    recordedAt: Int64(recDate.timeIntervalSince1970 * 1000),
+                    receivedAt: rcvDate != nil ? Int64(rcvDate!.timeIntervalSince1970 * 1000) : nil,
+                    timestampEstimated: row["timestamp_estimated"],
+                    soilRaw: row["soil_raw"],
+                    temperature: row["temperature"],
+                    humidity: row["humidity"],
+                    lightLux: row["light_lux"]
+                )
+            }
+        }
+    }
+
+    func insertRemoteSensorReadings(_ readings: [SyncSensorReading]) async throws -> Int {
+        try await writer.write { db in
+            var insertedCount = 0
+            let statement = try db.makeStatement(sql: """
+                INSERT INTO sensor_readings (
+                    device_id, sequence, recorded_at, received_at,
+                    timestamp_estimated, soil_raw, temperature, humidity, light_lux
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, sequence) DO NOTHING
+                """)
+            for r in readings {
+                let recDate = Date(timeIntervalSince1970: Double(r.recordedAt) / 1000.0)
+                let rcvDate = Date(timeIntervalSince1970: Double(r.receivedAt ?? r.recordedAt) / 1000.0)
+                try statement.execute(arguments: [
+                    r.deviceId,
+                    r.sequence,
+                    recDate,
+                    rcvDate,
+                    r.timestampEstimated ?? false,
+                    r.soilRaw,
+                    r.temperature,
+                    r.humidity,
+                    r.lightLux
+                ])
+                insertedCount += db.changesCount
+            }
+            return insertedCount
+        }
+    }
+
     /// Clears user-visible sensor and conversation history while preserving BLE
     /// sync cursors so records intentionally deleted here are not downloaded again.
     func deleteAllHistory() async throws {
         try await writer.write { db in
             try db.execute(sql: "DELETE FROM sensor_readings")
+            let conversationIDs = try String.fetchAll(db, sql: "SELECT id FROM ai_conversations")
             try db.execute(sql: "DELETE FROM ai_conversations")
+            let now = Date()
+            for conversationID in conversationIDs {
+                try Self.recordTombstone(
+                    db,
+                    entityType: SyncTombstone.EntityType.conversation.rawValue,
+                    entityID: conversationID,
+                    conversationID: nil,
+                    deletedAt: now,
+                    pendingPush: true
+                )
+            }
         }
+    }
+
+    // MARK: - Cloud sync tombstones
+
+    /// Upserts a tombstone. A row that still needs pushing is never downgraded to
+    /// "already synced", so a deletion cannot be silently dropped.
+    private static func recordTombstone(
+        _ db: Database,
+        entityType: String,
+        entityID: String,
+        conversationID: String?,
+        deletedAt: Date,
+        pendingPush: Bool
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO sync_tombstones (
+                    entity_type, entity_id, conversation_id, deleted_at, pending_push
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                    conversation_id = COALESCE(excluded.conversation_id, conversation_id),
+                    deleted_at = MIN(deleted_at, excluded.deleted_at),
+                    pending_push = pending_push AND excluded.pending_push
+                """,
+            arguments: [entityType, entityID, conversationID, deletedAt, pendingPush]
+        )
+    }
+
+    func allTombstones() async throws -> [SyncTombstone] {
+        try await writer.read { db in
+            try Row
+                .fetchAll(db, sql: """
+                    SELECT entity_type, entity_id, conversation_id, deleted_at, pending_push
+                    FROM sync_tombstones
+                    """)
+                .compactMap(Self.makeTombstone)
+        }
+    }
+
+    func pendingTombstones() async throws -> [SyncTombstone] {
+        try await writer.read { db in
+            try Row
+                .fetchAll(db, sql: """
+                    SELECT entity_type, entity_id, conversation_id, deleted_at, pending_push
+                    FROM sync_tombstones
+                    WHERE pending_push
+                    """)
+                .compactMap(Self.makeTombstone)
+        }
+    }
+
+    func markTombstonesPushed(_ tombstones: [SyncTombstone]) async throws {
+        guard !tombstones.isEmpty else { return }
+        try await writer.write { db in
+            for tombstone in tombstones {
+                try db.execute(
+                    sql: """
+                        UPDATE sync_tombstones SET pending_push = 0
+                        WHERE entity_type = ? AND entity_id = ?
+                        """,
+                    arguments: [tombstone.type.rawValue, tombstone.entityID]
+                )
+            }
+        }
+    }
+
+    /// Applies deletions made on another client: drops the local rows and records
+    /// the tombstones so a later pull cannot recreate them. Returns how many
+    /// conversations and messages were actually removed here.
+    func applyRemoteDeletions(_ deletions: [SyncTombstone]) async throws -> (conversations: Int, messages: Int) {
+        guard !deletions.isEmpty else { return (0, 0) }
+        return try await writer.write { db in
+            var removedConversations = 0
+            var removedMessages = 0
+            let now = Date()
+
+            for deletion in deletions {
+                switch deletion.type {
+                case .conversation:
+                    // ai_messages cascades on conversation delete.
+                    try db.execute(
+                        sql: "DELETE FROM ai_conversations WHERE id = ?",
+                        arguments: [deletion.entityID]
+                    )
+                    removedConversations += db.changesCount
+                case .message:
+                    let owningConversationID = try String.fetchOne(
+                        db,
+                        sql: "SELECT conversation_id FROM ai_messages WHERE id = ?",
+                        arguments: [deletion.entityID]
+                    )
+                    try db.execute(
+                        sql: "DELETE FROM ai_messages WHERE id = ?",
+                        arguments: [deletion.entityID]
+                    )
+                    removedMessages += db.changesCount
+
+                    guard let owningConversationID else { break }
+                    let latestMessageDate = try Date.fetchOne(
+                        db,
+                        sql: "SELECT MAX(created_at) FROM ai_messages WHERE conversation_id = ?",
+                        arguments: [owningConversationID]
+                    )
+                    if let latestMessageDate {
+                        try db.execute(
+                            sql: "UPDATE ai_conversations SET updated_at = ? WHERE id = ?",
+                            arguments: [latestMessageDate, owningConversationID]
+                        )
+                    } else {
+                        // An emptied conversation is deleted too, and that is a new
+                        // local decision the other clients have not seen yet.
+                        try db.execute(
+                            sql: "DELETE FROM ai_conversations WHERE id = ?",
+                            arguments: [owningConversationID]
+                        )
+                        if db.changesCount > 0 {
+                            removedConversations += 1
+                            try Self.recordTombstone(
+                                db,
+                                entityType: SyncTombstone.EntityType.conversation.rawValue,
+                                entityID: owningConversationID,
+                                conversationID: nil,
+                                deletedAt: now,
+                                pendingPush: true
+                            )
+                        }
+                    }
+                }
+
+                try Self.recordTombstone(
+                    db,
+                    entityType: deletion.type.rawValue,
+                    entityID: deletion.entityID,
+                    conversationID: deletion.conversationID,
+                    deletedAt: deletion.deletedAt,
+                    pendingPush: false
+                )
+            }
+
+            return (removedConversations, removedMessages)
+        }
+    }
+
+    private static func makeTombstone(_ row: Row) -> SyncTombstone? {
+        let rawType: String = row["entity_type"]
+        guard let type = SyncTombstone.EntityType(rawValue: rawType) else { return nil }
+        return SyncTombstone(
+            type: type,
+            entityID: row["entity_id"],
+            conversationID: row["conversation_id"],
+            deletedAt: row["deleted_at"],
+            pendingPush: row["pending_push"]
+        )
     }
 
     /// Emits an initial snapshot and then a fresh array after every committed write.
@@ -1151,6 +1415,25 @@ actor PlantDatabase {
 
             try db.drop(table: legacyTable)
             try Self.createAIMessageImagesIndex(db)
+        }
+        migrator.registerMigration("track sync deletions") { db in
+            // Deleting a row locally is not enough for cloud sync: the cloud
+            // mailbox still holds it, so the next pull would resurrect it. A
+            // tombstone is the durable "this was deleted" fact we push to the
+            // other clients. `pending_push` clears once the cloud accepts it.
+            try db.create(table: "sync_tombstones") { table in
+                table.column("entity_type", .text).notNull()
+                table.column("entity_id", .text).notNull()
+                table.column("conversation_id", .text)
+                table.column("deleted_at", .datetime).notNull()
+                table.column("pending_push", .boolean).notNull().defaults(to: true)
+                table.primaryKey(["entity_type", "entity_id"])
+            }
+            try db.create(
+                index: "sync_tombstones_pending",
+                on: "sync_tombstones",
+                columns: ["pending_push"]
+            )
         }
         return migrator
     }

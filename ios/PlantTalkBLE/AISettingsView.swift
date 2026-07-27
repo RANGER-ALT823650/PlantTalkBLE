@@ -89,6 +89,8 @@ struct AppSettingsView: View {
             do {
                 try await database.deleteAllHistory()
                 try await memoryStore.clear()
+                // 把这些删除也推给其他端，否则下次同步会从云端拉回来
+                await CloudSyncService.shared.sync(database: database)
                 historyAlert = .result("全部历史记录已删除。")
             } catch {
                 historyAlert = .result("删除失败：\(error.localizedDescription)")
@@ -754,6 +756,12 @@ struct CloudSyncSettingsView: View {
                     Text("同步失败: \(lastError)")
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+
+                if let lastWarning = syncService.lastWarning {
+                    Text(lastWarning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
         }

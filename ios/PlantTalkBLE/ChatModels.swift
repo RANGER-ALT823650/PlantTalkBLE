@@ -39,6 +39,23 @@ struct ChatImageAttachment: Identifiable, Equatable, Sendable {
     }
 }
 
+/// A recorded deletion. Removing a row locally is not enough for cloud sync: the
+/// cloud mailbox still holds it, so the next pull would resurrect it. A tombstone
+/// is the durable "this was deleted" fact that gets pushed to the other clients.
+struct SyncTombstone: Equatable, Sendable {
+    enum EntityType: String, Codable, Sendable {
+        case conversation
+        case message
+    }
+
+    let type: EntityType
+    let entityID: String
+    let conversationID: String?
+    let deletedAt: Date
+    /// `true` until the cloud has accepted this tombstone.
+    let pendingPush: Bool
+}
+
 struct ChatMessage: Identifiable, Equatable, Sendable {
     let id: UUID
     let conversationID: UUID

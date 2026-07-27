@@ -116,6 +116,8 @@ struct ConversationListView: View {
         Task {
             do {
                 try await database.deleteConversation(id: conversation.id)
+                // 立刻同步，把删除意图推给其他端；离线失败也没关系，墓碑会留到下次
+                await CloudSyncService.shared.sync(database: database)
             } catch {
                 errorMessage = error.localizedDescription
                 await loadConversations()
