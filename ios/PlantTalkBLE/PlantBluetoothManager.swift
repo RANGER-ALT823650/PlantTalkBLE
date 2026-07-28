@@ -127,14 +127,18 @@ final class PlantBluetoothManager: NSObject {
     /// Keeps historical tools scoped to the last plant device even after BLE
     /// disconnects. Live tools still require `state == .connected`.
     var currentOrLastKnownDeviceID: String? {
-        peripheral?.identifier.uuidString ?? lastKnownDeviceID
+        peripheral == nil ? lastKnownDeviceID : logicalDeviceID
     }
 
     /// A live reading can only be used for the device currently connected in
     /// this process. Historical conversations retain their separately bound ID.
     var connectedDeviceID: String? {
         guard state == .connected else { return nil }
-        return peripheral?.identifier.uuidString
+        return logicalDeviceID
+    }
+
+    private var logicalDeviceID: String {
+        PlantRemoteSampling.configuredDeviceID()
     }
 
     init(database: PlantDatabase? = nil) {
@@ -278,7 +282,7 @@ extension PlantBluetoothManager: CBCentralManagerDelegate {
             scanTimeoutTask = nil
             central.stopScan()
             self.peripheral = peripheral
-            lastKnownDeviceID = peripheral.identifier.uuidString
+            lastKnownDeviceID = logicalDeviceID
             peripheral.delegate = self
             state = .connecting
             central.connect(peripheral)
@@ -375,6 +379,13 @@ extension PlantBluetoothManager: CBPeripheralDelegate {
                 historySyncState = .idle
                 enqueueControlWrite(
                     HistoryTransferProtocol.makeSetUnixTime(),
+                    completion: .none
+                )
+                // The live characteristic can be empty immediately after boot.
+                // Force one fresh sample so the dashboard does not wait for the
+                // next five-minute scheduled reading.
+                enqueueControlWrite(
+                    HistoryTransferProtocol.makeImmediateSampleRequest(),
                     completion: .startHistorySync
                 )
                 peripheral.setNotifyValue(true, for: historyCharacteristic)
@@ -463,6 +474,13 @@ extension PlantBluetoothManager: CBPeripheralDelegate {
                 requestHistory(after: sequence)
             case .complete(let totalStored):
                 historySyncState = .completed(totalStored: totalStored)
+                if let database {
+                    // The acknowledgement write has completed, so the batch and
+                    // its resume cursor are durable before cloud sync can see it.
+                    Task {
+                        await CloudSyncService.shared.sync(database: database)
+                    }
+                }
             case .requestImmediateSample(let timeout):
                 beginWaitingForImmediateReading(timeout: timeout)
             }
@@ -572,15 +590,18 @@ private extension PlantBluetoothManager {
         let batch = historyBatch
         historyBatch.removeAll(keepingCapacity: true)
         historyBatchRejection = nil
-        let deviceID = peripheral.identifier.uuidString
+        let transportDeviceID = peripheral.identifier.uuidString
+        let readingDeviceID = logicalDeviceID
+        lastKnownDeviceID = readingDeviceID
         historySyncState = .saving(count: batch.count)
 
         historySyncTask = Task { [weak self] in
             do {
                 let result = try await database.saveHistoryBatch(
                     batch,
-                    deviceID: deviceID,
-                    acknowledgedThrough: end.lastSequence
+                    deviceID: transportDeviceID,
+                    acknowledgedThrough: end.lastSequence,
+                    readingDeviceID: readingDeviceID
                 )
                 guard !Task.isCancelled, let self else { return }
                 self.historySyncTask = nil
@@ -591,7 +612,7 @@ private extension PlantBluetoothManager {
                         completion: .requestNext(after: result.durableSequence)
                     )
                 } else {
-                    let total = try await database.readingCount(for: deviceID)
+                    let total = try await database.readingCount(for: readingDeviceID)
                     guard !Task.isCancelled else { return }
                     self.sendAcknowledgement(
                         through: result.durableSequence,

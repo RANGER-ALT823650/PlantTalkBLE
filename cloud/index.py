@@ -58,6 +58,11 @@ RANGE_PAGE_SIZE = 500
 # 否则设备离线期间堆积的 pending 会在它下次上线时被立刻执行，
 # 用户看到的是一条几天前请求的"即时"读数。
 COMMAND_TTL_MS = 60 * 1000
+# Estimated device clocks are allowed a small scheduling/network lead, but a
+# reading cannot legitimately be recorded well after the server receives it.
+# Five minutes matches the normal sampling cadence and avoids "repairing" a
+# harmless few-second clock difference.
+ESTIMATED_TIME_FUTURE_TOLERANCE_MS = 5 * 60 * 1000
 
 # 指令接口的路径。旧的复数写法一并保留，避免升级后老客户端 404。
 COMMAND_CREATE_PATHS = ('/command/create', '/commands/create')
@@ -238,6 +243,111 @@ def write_rows(client, table_name, items):
         client.batch_write_row(request)
 
 
+def sensor_reading_rows(items, server_received_at):
+    """
+    Normalize one client push into Tablestore rows.
+
+    ESP32 has no battery-backed clock. Before phone/cloud time arrives, a batch
+    can preserve the correct five-minute spacing but be shifted into the future.
+    For each contiguous estimated run, use the trustworthy receive time as an
+    upper bound and move the whole run together, preserving its intervals.
+    """
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        device_id = as_text(item.get('deviceId') or item.get('device_id')).strip()
+        sequence = as_int(item.get('sequence'), None)
+        if not device_id or sequence is None:
+            continue
+
+        recorded_at = as_int(
+            item.get('recordedAt') or item.get('recorded_at'),
+            server_received_at
+        )
+        client_received_at = as_int(
+            item.get('receivedAt') or item.get('received_at'),
+            server_received_at
+        )
+        # Preserve a plausible earlier BLE receive time, but never trust a
+        # client-supplied receive time that is itself in the future.
+        received_at = (
+            client_received_at
+            if 0 < client_received_at
+            <= server_received_at + ESTIMATED_TIME_FUTURE_TOLERANCE_MS
+            else server_received_at
+        )
+        normalized.append({
+            'item': item,
+            'device_id': device_id,
+            'sequence': sequence,
+            'recorded_at': recorded_at,
+            'received_at': received_at,
+            'timestamp_estimated': bool(
+                item.get('timestampEstimated')
+                or item.get('timestamp_estimated')
+                or False
+            ),
+        })
+
+    estimated_by_device = {}
+    for reading in normalized:
+        if reading['timestamp_estimated']:
+            estimated_by_device.setdefault(reading['device_id'], []).append(reading)
+
+    for readings in estimated_by_device.values():
+        readings.sort(key=lambda reading: reading['sequence'])
+        run = []
+
+        def repair_run():
+            if not run:
+                return
+            newest_recorded_at = max(reading['recorded_at'] for reading in run)
+            receive_anchor = max(reading['received_at'] for reading in run)
+            if newest_recorded_at <= (
+                receive_anchor + ESTIMATED_TIME_FUTURE_TOLERANCE_MS
+            ):
+                return
+            shift = newest_recorded_at - receive_anchor
+            for reading in run:
+                reading['recorded_at'] -= shift
+
+        for reading in readings:
+            if run and reading['sequence'] != run[-1]['sequence'] + 1:
+                repair_run()
+                run = []
+            run.append(reading)
+        repair_run()
+
+    rows = []
+    for reading in normalized:
+        item = reading['item']
+        attrs = [
+            ('recorded_at', reading['recorded_at']),
+            ('received_at', reading['received_at']),
+            ('timestamp_estimated', reading['timestamp_estimated']),
+            ('soil_raw', as_int(item.get('soilRaw') or item.get('soil_raw'), 0))
+        ]
+        temp = item.get('temperature')
+        hum = item.get('humidity')
+        light = (
+            item.get('lightLux')
+            if item.get('lightLux') is not None
+            else item.get('light_lux')
+        )
+        if temp is not None:
+            attrs.append(('temperature', float(temp)))
+        if hum is not None:
+            attrs.append(('humidity', float(hum)))
+        if light is not None:
+            attrs.append(('light_lux', float(light)))
+        rows.append((
+            [('device_id', reading['device_id']), ('sequence', reading['sequence'])],
+            attrs
+        ))
+    return rows
+
+
 def load_tombstones(client):
     """
     读取全部墓碑。返回 (conversation_ids, message_ids, records, supported)。
@@ -395,7 +505,7 @@ def handle_push(client, body_data):
     messages = body_data.get('messages') or []
     deletions = body_data.get('deletions') or []
 
-    now_ms = int(time.time() * 1000)
+    server_received_at = now_ms()
     missing_tables = set()
 
     # 1. 先落墓碑：删除意图优先于内容写入，避免同一批里"删了又被写回"
@@ -411,7 +521,10 @@ def handle_push(client, body_data):
         entity_id = canonical_id(item.get('id'))
         if entity_type not in (ENTITY_CONVERSATION, ENTITY_MESSAGE) or not entity_id:
             continue
-        deleted_at = as_int(item.get('deletedAt') or item.get('deleted_at'), now_ms)
+        deleted_at = as_int(
+            item.get('deletedAt') or item.get('deleted_at'),
+            server_received_at
+        )
         conversation_id = canonical_id(item.get('conversationId') or item.get('conversation_id'))
         tombstone_rows.append((
             [('entity_type', entity_type), ('entity_id', entity_id)],
@@ -473,8 +586,8 @@ def handle_push(client, body_data):
                 ('title', as_text(conv.get('title'), '未命名对话')),
                 ('kind', as_text(conv.get('kind'), 'text')),
                 ('device_id', as_text(conv.get('deviceId'))),
-                ('created_at', as_int(conv.get('createdAt'), now_ms)),
-                ('updated_at', as_int(conv.get('updatedAt'), now_ms))
+                ('created_at', as_int(conv.get('createdAt'), server_received_at)),
+                ('updated_at', as_int(conv.get('updatedAt'), server_received_at))
             ]
         ))
 
@@ -498,41 +611,13 @@ def handle_push(client, body_data):
             [
                 ('role', as_text(msg.get('role'), 'user')),
                 ('content', as_text(content)),
-                ('created_at', as_int(msg.get('createdAt'), now_ms)),
+                ('created_at', as_int(msg.get('createdAt'), server_received_at)),
                 ('tool_invocations', json.dumps(msg.get('toolInvocations') or [], ensure_ascii=False))
             ]
         ))
 
     sensor_readings = body_data.get('sensorReadings') or body_data.get('sensor_readings') or []
-    sr_rows = []
-    for item in sensor_readings:
-        if not isinstance(item, dict):
-            continue
-        device_id = as_text(item.get('deviceId') or item.get('device_id')).strip()
-        # as_int 永远有默认值，不能用它判断"缺字段"：否则没有 sequence 的读数
-        # 会全部落到 sequence=0 这一行上，互相覆盖。
-        sequence = as_int(item.get('sequence'), None)
-        if not device_id or sequence is None:
-            continue
-        recorded_at = as_int(item.get('recordedAt') or item.get('recorded_at'), now_ms)
-        received_at = as_int(item.get('receivedAt') or item.get('received_at'), recorded_at)
-        timestamp_est = bool(item.get('timestampEstimated') or item.get('timestamp_estimated') or False)
-        soil_raw = as_int(item.get('soilRaw') or item.get('soil_raw'), 0)
-        temp = item.get('temperature')
-        hum = item.get('humidity')
-        light = item.get('lightLux') if item.get('lightLux') is not None else item.get('light_lux')
-        
-        attrs = [
-            ('recorded_at', recorded_at),
-            ('received_at', received_at),
-            ('timestamp_estimated', timestamp_est),
-            ('soil_raw', soil_raw)
-        ]
-        if temp is not None: attrs.append(('temperature', float(temp)))
-        if hum is not None: attrs.append(('humidity', float(hum)))
-        if light is not None: attrs.append(('light_lux', float(light)))
-
-        sr_rows.append(([('device_id', device_id), ('sequence', sequence)], attrs))
+    sr_rows = sensor_reading_rows(sensor_readings, server_received_at)
 
     written = {}
     for table_name, rows in (
@@ -573,7 +658,7 @@ def handle_push(client, body_data):
         'deletions_count': accepted_deletions,
         'skipped_conversations': skipped_conversations,
         'skipped_messages': skipped_messages,
-        'serverTime': int(time.time() * 1000)
+        'serverTime': server_received_at
     }
     hint = missing_tables_hint(missing_tables)
     if hint:
@@ -879,6 +964,17 @@ def handle_poll_command(client, query_params):
     device_id = as_text(query_params.get('deviceId') or query_params.get('device_id') or 'default_device').strip()
     at_ms = now_ms()
 
+    def response(has_command, **fields):
+        # HTTPS polling remains available on networks that block NTP/UDP 123.
+        # Returning the same server clock on every outcome lets ESP32 establish
+        # an exact wall clock before its first scheduled sample.
+        return {
+            'success': True,
+            'hasCommand': has_command,
+            'serverTime': at_ms,
+            **fields,
+        }
+
     # 只有索引表本身不存在（老部署）才降级扫表。索引行不存在只说明当前
     # 没有待办——那是绝大多数轮询的结果，此时扫表会让轮询的开销回到原点。
     missing_tables = set()
@@ -901,26 +997,25 @@ def handle_poll_command(client, query_params):
             clear_pending_index(client, device_id, command_id)
 
     if candidate is None:
-        return {'success': True, 'hasCommand': False}
+        return response(False)
 
     # 用 commands 表核对真实状态：索引可能因为 respond 时写失败而滞后。
     attrs = read_single_row(client, TABLE_COMMANDS, [('command_id', candidate['commandId'])])
     if attrs is not None:
         if as_text(attrs.get('status')) != 'pending':
             clear_pending_index(client, device_id, candidate['commandId'])
-            return {'success': True, 'hasCommand': False}
+            return response(False)
         expires_at = as_int(attrs.get('expires_at'), 0)
         if expires_at and at_ms > expires_at:
             clear_pending_index(client, device_id, candidate['commandId'])
-            return {'success': True, 'hasCommand': False}
+            return response(False)
 
-    return {
-        'success': True,
-        'hasCommand': True,
-        'commandId': candidate['commandId'],
-        'command_id': candidate['commandId'],
-        'action': candidate['action'],
-    }
+    return response(
+        True,
+        commandId=candidate['commandId'],
+        command_id=candidate['commandId'],
+        action=candidate['action'],
+    )
 
 
 def sensor_reading_row(reading, received_ms):
@@ -944,10 +1039,23 @@ def sensor_reading_row(reading, received_ms):
     if seq < 0:
         raise ValueError('读数 sequence 非法')
 
+    recorded_at = as_int(
+        reading.get('recordedAt') or reading.get('recorded_at'),
+        received_ms
+    )
+    timestamp_estimated = bool(
+        reading.get('timestampEstimated') or reading.get('timestamp_estimated')
+    )
+    if (
+        timestamp_estimated
+        and recorded_at > received_ms + ESTIMATED_TIME_FUTURE_TOLERANCE_MS
+    ):
+        recorded_at = received_ms
+
     attrs = [
-        ('recorded_at', as_int(reading.get('recordedAt') or reading.get('recorded_at'), received_ms)),
+        ('recorded_at', recorded_at),
         ('received_at', received_ms),
-        ('timestamp_estimated', bool(reading.get('timestampEstimated') or reading.get('timestamp_estimated'))),
+        ('timestamp_estimated', timestamp_estimated),
         ('soil_raw', as_int(reading.get('soilRaw') or reading.get('soil_raw'), 0)),
     ]
     temp = reading.get('temperature')

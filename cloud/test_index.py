@@ -415,6 +415,27 @@ class DeletionSyncTests(unittest.TestCase):
         self.assertEqual([r['sequence'] for r in pulled['sensorReadings']], [1, 2])
         self.assertEqual(pulled['sensorReadings'][0]['soilRaw'], 1234)
 
+    def test_future_estimated_batch_is_anchored_to_server_receive_time(self):
+        readings = [
+            {
+                **make_reading(sequence=1, recorded=1_600_000),
+                'receivedAt': 1_600_000,
+                'timestampEstimated': True,
+            },
+            {
+                **make_reading(sequence=2, recorded=1_900_000),
+                'receivedAt': 1_900_000,
+                'timestampEstimated': True,
+            },
+        ]
+        rows = index.sensor_reading_rows(readings, server_received_at=1_000_000)
+        attrs = [{name: value for name, value in row_attrs} for _, row_attrs in rows]
+
+        # Shift the run together: its five-minute spacing survives, while the
+        # newest estimate can no longer appear after the server received it.
+        self.assertEqual([item['recorded_at'] for item in attrs], [700_000, 1_000_000])
+        self.assertEqual([item['received_at'] for item in attrs], [1_000_000, 1_000_000])
+
     def test_reading_without_sequence_is_rejected(self):
         """缺 sequence 的读数若落到 sequence=0，多条读数会互相覆盖。"""
         no_seq = make_reading()
@@ -559,11 +580,12 @@ class CommandMailboxTests(unittest.TestCase):
         os.environ['AUTH_TOKEN'] = TEST_TOKEN
         self.client = FakeOTSClient(FULL_TABLES)
         self.clock = 1_000_000
+        self.original_now_ms = index.now_ms
         index.now_ms = lambda: self.clock
 
     def tearDown(self):
         # now_ms 是模块级函数，冻结完必须还原，否则污染同进程内的其它测试。
-        index.now_ms = lambda: int(time.time() * 1000)
+        index.now_ms = self.original_now_ms
 
     def create(self, device_id='d1', action='refresh_sensor', client=None):
         status, data = call(
@@ -605,6 +627,7 @@ class CommandMailboxTests(unittest.TestCase):
 
         polled = self.poll()
         self.assertTrue(polled['hasCommand'])
+        self.assertEqual(polled['serverTime'], self.clock)
         self.assertEqual(polled['commandId'], created['commandId'])
         self.assertEqual(polled['action'], 'refresh_sensor')
 
@@ -652,8 +675,27 @@ class CommandMailboxTests(unittest.TestCase):
         self.respond(self.create()['commandId'], make_reading(sequence=1))
         self.client.range_calls = 0
         for _ in range(10):
-            self.assertFalse(self.poll()['hasCommand'])
+            polled = self.poll()
+            self.assertFalse(polled['hasCommand'])
+            self.assertEqual(polled['serverTime'], self.clock)
         self.assertEqual(self.client.range_calls, 0, '空闲轮询同样不应扫表')
+
+    def test_future_estimated_command_reading_is_clamped_when_received(self):
+        created = self.create()
+        reading = make_reading(sequence=71, recorded=self.clock + 600_000)
+        reading['timestampEstimated'] = True
+        self.respond(created['commandId'], reading)
+
+        status, pulled = call(
+            self.client,
+            'GET',
+            '/sync/pull',
+            query={'since': '0'},
+        )
+        self.assertEqual(status, 200, pulled)
+        stored = next(item for item in pulled['sensorReadings'] if item['sequence'] == 71)
+        self.assertEqual(stored['recordedAt'], self.clock)
+        self.assertEqual(stored['receivedAt'], self.clock)
 
     def test_expired_pending_is_not_delivered(self):
         """

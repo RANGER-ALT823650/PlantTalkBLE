@@ -1,10 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_SHT31.h>
 #include <BH1750.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <NimBLEDevice.h>
 #include <FS.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -19,6 +16,7 @@
 #if __has_include("CloudConfig.h")
 #include "CloudConfig.h"
 #define PLANT_CLOUD_ENABLED 1
+#include <esp_sntp.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -29,6 +27,12 @@
 
 // ---------- Hardware ----------
 constexpr uint8_t STATUS_LED_PIN = 2;
+// This board's blue status LED is driven high. Keep the polarity in one place
+// so a future board revision with an active-low LED only needs these two values
+// changed.
+constexpr uint8_t STATUS_LED_ON_LEVEL = HIGH;
+constexpr uint8_t STATUS_LED_OFF_LEVEL = LOW;
+constexpr unsigned long WIFI_SEARCH_LED_TOGGLE_MS = 500;
 constexpr uint8_t I2C_SDA_PIN = 21;
 constexpr uint8_t I2C_SCL_PIN = 22;
 constexpr uint8_t SOIL_ADC_PIN = 34;
@@ -80,28 +84,47 @@ constexpr unsigned long CLOUD_POLL_INTERVAL_MS = 3000;
 // does not turn into a tight request loop.
 constexpr unsigned long CLOUD_POLL_BACKOFF_MS = 15000;
 constexpr unsigned long CLOUD_WIFI_RETRY_MS = 30000;
-constexpr unsigned long CLOUD_HTTP_TIMEOUT_MS = 8000;
+constexpr unsigned long CLOUD_HTTP_TIMEOUT_MS = 20000;
+constexpr unsigned long CLOUD_TLS_HANDSHAKE_TIMEOUT_SECONDS = 20;
 // How long the Wi-Fi task waits for the main loop to take the sample it asked
 // for. Sampling itself is fast; the budget covers a loop busy shipping a
 // history batch over BLE.
 constexpr unsigned long CLOUD_SAMPLE_WAIT_MS = 6000;
-constexpr uint32_t CLOUD_TASK_STACK_BYTES = 8192;
-// Pin the network task to core 0 and leave the Arduino loop (core 1) alone, so
-// BLE history transfer keeps its timing.
-constexpr BaseType_t CLOUD_TASK_CORE = 0;
+// Keep more than five hours of five-minute readings in RAM while Wi-Fi or the
+// cloud is temporarily unavailable. LittleFS remains the durable source of
+// truth; this queue is the live Wi-Fi delivery path and retries its oldest item
+// before accepting that it has reached the cloud.
+constexpr UBaseType_t CLOUD_HISTORY_UPLOAD_QUEUE_DEPTH = 64;
+constexpr uint32_t CLOUD_TASK_STACK_BYTES = 12288;
+// The ESP32 Bluetooth/Wi-Fi controller work is concentrated on core 0. Keep our
+// TLS/JSON application work on the Arduino core, and suspend it entirely while
+// a BLE client owns the device.
+constexpr BaseType_t CLOUD_TASK_CORE = 1;
 constexpr UBaseType_t CLOUD_TASK_PRIORITY = 1;
 #endif
 
 // ---------- LittleFS ring storage ----------
 constexpr char HISTORY_FILE_PATH[] = "/history.bin";
+constexpr char HISTORY_REBASE_FILE_PATH[] = "/history.rebase";
+constexpr char HISTORY_BACKUP_FILE_PATH[] = "/history.backup";
 constexpr size_t HISTORY_FS_RESERVE_BYTES = 64UL * 1024UL;
 constexpr uint32_t SEQUENCE_RESERVATION_SIZE = 1024;
 constexpr uint32_t MIN_REASONABLE_UNIX_TIME = 1704067200UL;  // 2024-01-01 UTC
+// Arduino's __DATE__/__TIME__ values use the build machine's wall clock. This
+// project is built in China, so convert that UTC+8 wall time to Unix UTC before
+// it is used as the offline clock fallback. Phone/NTP time remains UTC already.
+constexpr uint32_t BUILD_TIME_UTC_OFFSET_SECONDS = 8UL * 60UL * 60UL;
+constexpr uint32_t MAX_BUILD_CLOCK_FUTURE_SKEW_SECONDS = 5UL * 60UL;
+// Version 2 moves the sequence space into the Unix-time range. Sequence 1 was
+// previously reused after both LittleFS and NVS were reset, while iOS correctly
+// retained a much higher durable cursor. The reused records then became
+// permanently invisible to every already-synced client.
+constexpr uint8_t SEQUENCE_SCHEMA_VERSION = 2;
 
 Adafruit_SHT31 sht31;
 BH1750 lightMeter;
-BLECharacteristic *dataCharacteristic = nullptr;
-BLECharacteristic *historyCharacteristic = nullptr;
+NimBLECharacteristic *dataCharacteristic = nullptr;
+NimBLECharacteristic *historyCharacteristic = nullptr;
 QueueHandle_t controlCommandQueue = nullptr;
 Preferences sequencePreferences;
 
@@ -156,9 +179,13 @@ struct CloudSampleResult {
 };
 
 SemaphoreHandle_t cloudSampleMutex = nullptr;
+QueueHandle_t cloudHistoryUploadQueue = nullptr;
 TaskHandle_t cloudTaskHandle = nullptr;
 volatile uint32_t cloudSampleRequestToken = 0;
 CloudSampleResult cloudLastSample = {};
+bool cloudClockSynced = false;
+bool cloudClockSyncStarted = false;
+volatile uint8_t cloudLastWiFiDisconnectReason = 0;
 #endif
 
 struct QueuedCommand {
@@ -262,7 +289,14 @@ uint32_t buildUnixTime() {
   sscanf(__DATE__, "%3s %d %d", month, &day, &year);
   sscanf(__TIME__, "%d:%d:%d", &hour, &minute, &second);
   const int64_t days = daysFromCivil(year, monthNumber(month), day);
-  return static_cast<uint32_t>(days * 86400 + hour * 3600 + minute * 60 + second);
+  const int64_t localBuildTime =
+    days * 86400 + hour * 3600 + minute * 60 + second;
+  return static_cast<uint32_t>(
+    max(
+      localBuildTime - static_cast<int64_t>(BUILD_TIME_UTC_OFFSET_SECONDS),
+      static_cast<int64_t>(MIN_REASONABLE_UNIX_TIME)
+    )
+  );
 }
 
 void setSystemClock(uint32_t unixTime, bool estimated) {
@@ -346,6 +380,294 @@ void restoreHistoryState() {
   );
 }
 
+// Builds before the UTC conversion fix wrote the compiler's UTC+8 wall clock
+// directly into records made before iPhone/NTP synchronization. Correct only
+// estimated records that are implausibly in the future and become plausible
+// after the known offset is removed. The test is deliberately idempotent, so an
+// interrupted pass can safely continue on the next boot.
+bool repairFutureEstimatedHistoryTimestamps() {
+  if (historyCount == 0) {
+    return true;
+  }
+
+  File file = LittleFS.open(HISTORY_FILE_PATH, "r+");
+  if (!file) {
+    Serial.println("ERROR: Could not open history for timestamp repair.");
+    return false;
+  }
+
+  const uint32_t plausibleNow = currentUnixTime();
+  const uint32_t latestPlausible =
+    plausibleNow + MAX_BUILD_CLOCK_FUTURE_SKEW_SECONDS;
+  uint8_t packet[HISTORY_PACKET_SIZE] = {};
+  uint32_t repairedCount = 0;
+  uint32_t recordsVisited = 0;
+
+  // The ring file is sparse: an epoch-sized sequence can place a few records
+  // tens of thousands of physical slots into the file. Iterate the logical
+  // sequence range instead of seeking through every empty slot on every boot.
+  for (
+    uint32_t sequence = oldestSequence;
+    sequence != 0
+      && sequence <= newestSequence
+      && recordsVisited < historyCount;
+    ++sequence
+  ) {
+    const uint32_t slot = (sequence - 1) % historyCapacity;
+    const size_t offset = static_cast<size_t>(slot) * HISTORY_PACKET_SIZE;
+    if (!file.seek(offset, SeekSet)
+        || file.read(packet, sizeof(packet)) != sizeof(packet)
+        || !isValidStoredRecord(packet)
+        || readUInt32LE(packet + 4) != sequence) {
+      continue;
+    }
+    ++recordsVisited;
+    if ((packet[2] & FLAG_TIME_ESTIMATED) == 0) {
+      continue;
+    }
+
+    const uint32_t timestamp = readUInt32LE(packet + 8);
+    if (timestamp <= latestPlausible
+        || timestamp <= BUILD_TIME_UTC_OFFSET_SECONDS) {
+      continue;
+    }
+    const uint32_t corrected =
+      timestamp - BUILD_TIME_UTC_OFFSET_SECONDS;
+    if (corrected > latestPlausible) {
+      continue;
+    }
+
+    writeUInt32LE(packet + 8, corrected);
+    packet[3] = historyChecksum(packet, sizeof(packet));
+    if (!file.seek(offset, SeekSet)
+        || file.write(packet, sizeof(packet)) != sizeof(packet)) {
+      file.close();
+      Serial.println("ERROR: Could not repair estimated history timestamp.");
+      return false;
+    }
+    ++repairedCount;
+  }
+  file.flush();
+  file.close();
+
+  if (repairedCount > 0) {
+    Serial.printf(
+      "Repaired %lu future estimated history timestamps.\n",
+      static_cast<unsigned long>(repairedCount)
+    );
+    restoreHistoryState();
+  }
+  return true;
+}
+
+// Once phone or cloud time is available, it becomes a hard upper bound for
+// earlier estimated records. Move the complete future-shifted run together so
+// the five-minute spacing survives instead of clamping every row to one time.
+bool reanchorFutureEstimatedHistoryTimestamps(uint32_t exactUnixTime) {
+  if (historyCount == 0) {
+    return true;
+  }
+
+  File file = LittleFS.open(HISTORY_FILE_PATH, "r+");
+  if (!file) {
+    Serial.println("ERROR: Could not open history for exact-time repair.");
+    return false;
+  }
+
+  const uint32_t latestPlausible =
+    exactUnixTime + MAX_BUILD_CLOCK_FUTURE_SKEW_SECONDS;
+  uint8_t packet[HISTORY_PACKET_SIZE] = {};
+  uint32_t latestFutureTimestamp = 0;
+  uint32_t recordsVisited = 0;
+
+  for (
+    uint32_t sequence = oldestSequence;
+    sequence != 0
+      && sequence <= newestSequence
+      && recordsVisited < historyCount;
+    ++sequence
+  ) {
+    if (!readHistoryRecord(file, sequence, packet)) {
+      continue;
+    }
+    ++recordsVisited;
+    if ((packet[2] & FLAG_TIME_ESTIMATED) == 0) {
+      continue;
+    }
+    const uint32_t timestamp = readUInt32LE(packet + 8);
+    if (timestamp > latestPlausible) {
+      latestFutureTimestamp = max(latestFutureTimestamp, timestamp);
+    }
+  }
+
+  if (latestFutureTimestamp == 0) {
+    file.close();
+    return true;
+  }
+
+  const uint32_t shift = latestFutureTimestamp - exactUnixTime;
+  uint32_t repairedCount = 0;
+  recordsVisited = 0;
+  for (
+    uint32_t sequence = oldestSequence;
+    sequence != 0
+      && sequence <= newestSequence
+      && recordsVisited < historyCount;
+    ++sequence
+  ) {
+    const uint32_t slot = (sequence - 1) % historyCapacity;
+    const size_t offset = static_cast<size_t>(slot) * HISTORY_PACKET_SIZE;
+    if (!file.seek(offset, SeekSet)
+        || file.read(packet, sizeof(packet)) != sizeof(packet)
+        || !isValidStoredRecord(packet)
+        || readUInt32LE(packet + 4) != sequence) {
+      continue;
+    }
+    ++recordsVisited;
+    const uint32_t timestamp = readUInt32LE(packet + 8);
+    if ((packet[2] & FLAG_TIME_ESTIMATED) == 0
+        || timestamp <= latestPlausible) {
+      continue;
+    }
+
+    writeUInt32LE(packet + 8, timestamp > shift ? timestamp - shift : exactUnixTime);
+    packet[3] = historyChecksum(packet, sizeof(packet));
+    if (!file.seek(offset, SeekSet)
+        || file.write(packet, sizeof(packet)) != sizeof(packet)) {
+      file.close();
+      Serial.println("ERROR: Could not re-anchor estimated history timestamp.");
+      return false;
+    }
+    ++repairedCount;
+  }
+  file.flush();
+  file.close();
+
+  if (repairedCount > 0) {
+    Serial.printf(
+      "Re-anchored %lu future estimated history timestamps by %lu seconds.\n",
+      static_cast<unsigned long>(repairedCount),
+      static_cast<unsigned long>(shift)
+    );
+    restoreHistoryState();
+  }
+  return true;
+}
+
+bool recoverInterruptedHistoryRebase() {
+  if (!LittleFS.exists(HISTORY_FILE_PATH)
+      && LittleFS.exists(HISTORY_BACKUP_FILE_PATH)) {
+    if (!LittleFS.rename(HISTORY_BACKUP_FILE_PATH, HISTORY_FILE_PATH)) {
+      Serial.println("ERROR: Could not recover history backup after interrupted rebase.");
+      return false;
+    }
+    Serial.println("Recovered history backup after interrupted sequence rebase.");
+  }
+  if (LittleFS.exists(HISTORY_REBASE_FILE_PATH)) {
+    LittleFS.remove(HISTORY_REBASE_FILE_PATH);
+  }
+  if (LittleFS.exists(HISTORY_FILE_PATH)
+      && LittleFS.exists(HISTORY_BACKUP_FILE_PATH)) {
+    LittleFS.remove(HISTORY_BACKUP_FILE_PATH);
+  }
+  return true;
+}
+
+// Rewrites every currently valid record into one fresh, contiguous sequence
+// range without changing timestamps or sensor values. The original file stays
+// intact until the replacement has been fully flushed, and a backup is kept
+// across the final rename so a power loss can be recovered on the next boot.
+bool rebaseHistorySequences(uint32_t firstSequence) {
+  if (historyCount == 0) {
+    oldestSequence = 0;
+    newestSequence = 0;
+    nextSequence = firstSequence;
+    return true;
+  }
+  if (firstSequence == 0
+      || historyCount - 1 > UINT32_MAX - firstSequence) {
+    Serial.println("ERROR: Not enough sequence space to rebase history.");
+    return false;
+  }
+
+  File source = LittleFS.open(HISTORY_FILE_PATH, "r");
+  if (!source) {
+    Serial.println("ERROR: Could not open history source for sequence rebase.");
+    return false;
+  }
+  LittleFS.remove(HISTORY_REBASE_FILE_PATH);
+  File replacement = LittleFS.open(HISTORY_REBASE_FILE_PATH, "w+");
+  if (!replacement) {
+    source.close();
+    Serial.println("ERROR: Could not create history sequence rebase file.");
+    return false;
+  }
+
+  uint8_t packet[HISTORY_PACKET_SIZE] = {};
+  uint32_t rebasedCount = 0;
+  uint32_t candidate = oldestSequence;
+  while (candidate <= newestSequence && rebasedCount < historyCount) {
+    if (readHistoryRecord(source, candidate, packet)) {
+      const uint32_t rebasedSequence = firstSequence + rebasedCount;
+      writeUInt32LE(packet + 4, rebasedSequence);
+      packet[3] = historyChecksum(packet, sizeof(packet));
+      const uint32_t slot = (rebasedSequence - 1) % historyCapacity;
+      const size_t offset = static_cast<size_t>(slot) * HISTORY_PACKET_SIZE;
+      if (!replacement.seek(offset, SeekSet)
+          || replacement.write(packet, sizeof(packet)) != sizeof(packet)) {
+        source.close();
+        replacement.close();
+        LittleFS.remove(HISTORY_REBASE_FILE_PATH);
+        Serial.println("ERROR: Could not write rebased history record.");
+        return false;
+      }
+      ++rebasedCount;
+    }
+    if (candidate == UINT32_MAX) {
+      break;
+    }
+    ++candidate;
+  }
+  replacement.flush();
+  replacement.close();
+  source.close();
+
+  if (rebasedCount == 0 || rebasedCount != historyCount) {
+    LittleFS.remove(HISTORY_REBASE_FILE_PATH);
+    Serial.printf(
+      "ERROR: History rebase found %lu of %lu records.\n",
+      static_cast<unsigned long>(rebasedCount),
+      static_cast<unsigned long>(historyCount)
+    );
+    return false;
+  }
+
+  LittleFS.remove(HISTORY_BACKUP_FILE_PATH);
+  if (!LittleFS.rename(HISTORY_FILE_PATH, HISTORY_BACKUP_FILE_PATH)) {
+    LittleFS.remove(HISTORY_REBASE_FILE_PATH);
+    Serial.println("ERROR: Could not preserve original history before rebase.");
+    return false;
+  }
+  if (!LittleFS.rename(HISTORY_REBASE_FILE_PATH, HISTORY_FILE_PATH)) {
+    LittleFS.rename(HISTORY_BACKUP_FILE_PATH, HISTORY_FILE_PATH);
+    Serial.println("ERROR: Could not activate rebased history; original restored.");
+    return false;
+  }
+  LittleFS.remove(HISTORY_BACKUP_FILE_PATH);
+
+  historyCount = rebasedCount;
+  oldestSequence = firstSequence;
+  newestSequence = firstSequence + rebasedCount - 1;
+  nextSequence = newestSequence + 1;
+  Serial.printf(
+    "History sequence epoch migrated: %lu records now %lu...%lu.\n",
+    static_cast<unsigned long>(historyCount),
+    static_cast<unsigned long>(oldestSequence),
+    static_cast<unsigned long>(newestSequence)
+  );
+  return true;
+}
+
 bool reserveSequenceRangeIfNeeded() {
   if (nextSequence < sequenceReservationEnd) {
     return true;
@@ -377,6 +699,32 @@ void initializeSequenceReservation() {
 
   const bool hadReservation = sequencePreferences.isKey("seqEnd");
   sequenceReservationEnd = sequencePreferences.getULong("seqEnd", 0);
+  const uint8_t storedSchema = sequencePreferences.getUChar("seqSchema", 0);
+
+  // Legacy sequence values were small counters. Move any such surviving file
+  // into a globally newer range before BLE or Wi-Fi can expose it. Build time is
+  // available even before NTP and grows much faster than the five-minute counter,
+  // so a later storage reset cannot reuse an earlier client's sequence IDs.
+  if (historyCount > 0 && newestSequence < MIN_REASONABLE_UNIX_TIME) {
+    const uint32_t epochStart = max(buildUnixTime(), MIN_REASONABLE_UNIX_TIME);
+    if (!rebaseHistorySequences(epochStart)) {
+      historyStorageReady = false;
+      return;
+    }
+    sequenceReservationEnd = 0;
+  } else if (historyCount == 0
+             && sequenceReservationEnd < MIN_REASONABLE_UNIX_TIME) {
+    nextSequence = max(buildUnixTime(), MIN_REASONABLE_UNIX_TIME);
+    sequenceReservationEnd = 0;
+  }
+
+  if (storedSchema < SEQUENCE_SCHEMA_VERSION
+      && sequencePreferences.putUChar("seqSchema", SEQUENCE_SCHEMA_VERSION)
+          != sizeof(uint8_t)) {
+    Serial.println("ERROR: Could not persist history sequence schema.");
+    historyStorageReady = false;
+    return;
+  }
 
   // A valid NVS reservation with an empty/reformatted LittleFS means previously
   // issued sequence numbers must not be reused. Skip to the reserved boundary.
@@ -408,7 +756,15 @@ void initializeHistoryStorage() {
     (totalBytes - reserveBytes) / HISTORY_PACKET_SIZE
   );
   historyStorageReady = historyCapacity > 0;
+  if (!recoverInterruptedHistoryRebase()) {
+    historyStorageReady = false;
+    return;
+  }
   restoreHistoryState();
+  if (!repairFutureEstimatedHistoryTimestamps()) {
+    historyStorageReady = false;
+    return;
+  }
   initializeSequenceReservation();
 
   Serial.printf(
@@ -767,10 +1123,14 @@ void enqueueCommand(const QueuedCommand &command) {
   }
 }
 
-class ControlCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *characteristic) override {
-    const uint8_t *data = characteristic->getData();
-    const size_t length = characteristic->getLength();
+class ControlCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(
+    NimBLECharacteristic *characteristic,
+    NimBLEConnInfo &connection
+  ) override {
+    const NimBLEAttValue value = characteristic->getValue();
+    const uint8_t *data = value.data();
+    const size_t length = value.size();
     if (data == nullptr || length < 2 || data[0] != PROTOCOL_VERSION) {
       enqueueCommand({QueuedCommandType::SendFailure, 1, 0});
       return;
@@ -828,14 +1188,21 @@ class ControlCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *server) override {
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(
+    NimBLEServer *server,
+    NimBLEConnInfo &connection
+  ) override {
     clientConnected = true;
     advertisingRestartPending = false;
     Serial.println("BLE client connected.");
   }
 
-  void onDisconnect(BLEServer *server) override {
+  void onDisconnect(
+    NimBLEServer *server,
+    NimBLEConnInfo &connection,
+    int reason
+  ) override {
     clientConnected = false;
     if (controlCommandQueue != nullptr) {
       xQueueReset(controlCommandQueue);
@@ -857,43 +1224,41 @@ void restartAdvertisingAfterDisconnect() {
   }
 
   advertisingRestartPending = false;
-  BLEDevice::startAdvertising();
+  NimBLEDevice::startAdvertising();
   Serial.println("BLE advertising restarted; waiting for one client.");
 }
 
 void initializeBLE() {
   controlCommandQueue = xQueueCreate(8, sizeof(QueuedCommand));
-  BLEDevice::init(DEVICE_NAME);
+  // NimBLE preserves the GATT protocol while leaving substantially more heap
+  // available for TLS than the original Bluedroid stack.
+  NimBLEDevice::init(DEVICE_NAME);
 
-  BLEServer *server = BLEDevice::createServer();
+  NimBLEServer *server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
-  BLEService *service = server->createService(SERVICE_UUID);
+  NimBLEService *service = server->createService(SERVICE_UUID);
 
   dataCharacteristic = service->createCharacteristic(
     DATA_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
-  dataCharacteristic->addDescriptor(new BLE2902());
 
-  BLECharacteristic *controlCharacteristic = service->createCharacteristic(
+  NimBLECharacteristic *controlCharacteristic = service->createCharacteristic(
     CONTROL_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
+    NIMBLE_PROPERTY::WRITE
   );
   controlCharacteristic->setCallbacks(new ControlCallbacks());
 
   historyCharacteristic = service->createCharacteristic(
     HISTORY_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_NOTIFY
+    NIMBLE_PROPERTY::NOTIFY
   );
-  historyCharacteristic->addDescriptor(new BLE2902());
 
-  service->start();
-  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
-  advertising->setScanResponse(true);
-  advertising->setMinPreferred(0x06);
-  advertising->setMaxPreferred(0x12);
-  BLEDevice::startAdvertising();
+  advertising->enableScanResponse(true);
+  advertising->setPreferredParams(0x06, 0x12);
+  NimBLEDevice::startAdvertising();
 
   Serial.println("BLE advertising with live, control, and history characteristics.");
 }
@@ -920,8 +1285,11 @@ void processControlCommands() {
     case QueuedCommandType::SetUnixTime:
       if (command.value >= MIN_REASONABLE_UNIX_TIME) {
         setSystemClock(command.value, false);
+        if (!reanchorFutureEstimatedHistoryTimestamps(command.value)) {
+          Serial.println("WARNING: Exact clock applied, but stored estimates could not be repaired.");
+        }
         Serial.printf(
-          "Clock synchronized by iPhone: %lu.\n",
+          "Clock synchronized by client or NTP: %lu.\n",
           static_cast<unsigned long>(command.value)
         );
       } else {
@@ -944,28 +1312,47 @@ void processControlCommands() {
 #if PLANT_CLOUD_ENABLED
 // ---------- Cloud command mailbox (Wi-Fi side channel) ----------
 //
-// Everything below runs on a dedicated core-0 task and is strictly additive: it
+// Everything below runs on a dedicated low-priority task and is strictly additive: it
 // never touches BLE state, LittleFS or the sample scheduler directly. The only
 // coupling points are the existing control queue (to ask for a sample) and
 // cloudLastSample (to read the result back).
 
 void publishCloudSample(const SensorSample &sample, uint32_t sequence, uint32_t recordedAt) {
-  if (cloudSampleMutex == nullptr) {
+  if (cloudSampleMutex == nullptr || cloudHistoryUploadQueue == nullptr) {
     return;
   }
-  if (xSemaphoreTake(cloudSampleMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-    return;
+
+  const CloudSampleResult committed = {
+    cloudSampleRequestToken,
+    sequence,
+    recordedAt,
+    sample.soilRaw,
+    sample.temperature,
+    sample.humidity,
+    sample.lightLux,
+    static_cast<uint8_t>(
+      sample.flags | (clockEstimated ? FLAG_TIME_ESTIMATED : 0)
+    ),
+    true
+  };
+
+  // The immediate-command mailbox is best-effort here. A scheduled sample must
+  // still enter the history upload queue even if command polling happens to
+  // hold this mutex at the same instant.
+  if (xSemaphoreTake(cloudSampleMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    cloudLastSample = committed;
+    xSemaphoreGive(cloudSampleMutex);
   }
-  cloudLastSample.token = cloudSampleRequestToken;
-  cloudLastSample.sequence = sequence;
-  cloudLastSample.recordedAt = recordedAt;
-  cloudLastSample.soilRaw = sample.soilRaw;
-  cloudLastSample.temperature = sample.temperature;
-  cloudLastSample.humidity = sample.humidity;
-  cloudLastSample.lightLux = sample.lightLux;
-  cloudLastSample.flags = sample.flags | (clockEstimated ? FLAG_TIME_ESTIMATED : 0);
-  cloudLastSample.stored = true;
-  xSemaphoreGive(cloudSampleMutex);
+
+  // Queue only after LittleFS committed the record. The network task peeks and
+  // removes it only after a successful /sync/push response, so a transient HTTP
+  // failure does not silently lose the next five-minute reading.
+  if (xQueueSend(cloudHistoryUploadQueue, &committed, 0) != pdTRUE) {
+    Serial.printf(
+      "CLOUD: history upload queue full; sequence %lu remains available over BLE.\n",
+      static_cast<unsigned long>(sequence)
+    );
+  }
 }
 
 // Asks the main loop for a fresh sample and waits for it. Returns false if the
@@ -1010,8 +1397,13 @@ bool ensureWiFiConnected() {
     return true;
   }
 
-  Serial.printf("CLOUD: connecting to Wi-Fi SSID %s ...\n", PLANT_WIFI_SSID);
+  Serial.println("CLOUD: connecting to configured Wi-Fi network...");
   WiFi.mode(WIFI_STA);
+  // Switching from WIFI_OFF can emit the previous intentional STA_LEAVING
+  // event asynchronously. Clear it after the mode transition so the failure
+  // below reports the current association attempt.
+  vTaskDelay(pdMS_TO_TICKS(50));
+  cloudLastWiFiDisconnectReason = 0;
   // Wi-Fi and BLE share one 2.4 GHz radio on this chip. Modem sleep lets the
   // coexistence arbiter hand the radio back to BLE between polls; without it
   // BLE history transfer slows down noticeably.
@@ -1024,7 +1416,13 @@ bool ensureWiFiConnected() {
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("CLOUD: Wi-Fi connect failed; staying in BLE-only mode this round.");
+    const uint8_t reason = cloudLastWiFiDisconnectReason;
+    Serial.printf(
+      "CLOUD: Wi-Fi connect failed (status %d, reason %u %s); staying in BLE-only mode this round.\n",
+      static_cast<int>(WiFi.status()),
+      static_cast<unsigned>(reason),
+      WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason))
+    );
     // Drop the radio rather than leaving it retrying in the background, so BLE
     // gets the full airtime until the next attempt.
     WiFi.disconnect(true);
@@ -1037,18 +1435,77 @@ bool ensureWiFiConnected() {
   return true;
 }
 
+bool publishExactClockToMainLoop(uint32_t unixTime, const char *source) {
+  if (unixTime < MIN_REASONABLE_UNIX_TIME) {
+    return false;
+  }
+  const QueuedCommand command = {
+    QueuedCommandType::SetUnixTime,
+    unixTime,
+    0
+  };
+  if (xQueueSend(controlCommandQueue, &command, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.printf("CLOUD: could not publish %s time to the sampling loop.\n", source);
+    return false;
+  }
+  cloudClockSynced = true;
+  Serial.printf(
+    "CLOUD: clock synchronized by %s: %lu.\n",
+    source,
+    static_cast<unsigned long>(unixTime)
+  );
+  return true;
+}
+
+// Starts SNTP once and observes it without blocking cloud command polling.
+// The HTTPS poll response is the primary clock source; NTP remains a fallback
+// for compatible deployments that have not yet added serverTime.
+void updateClockFromNTP() {
+  if (cloudClockSynced
+      || WiFi.status() != WL_CONNECTED
+      || clientConnected) {
+    return;
+  }
+
+  if (!cloudClockSyncStarted) {
+    Serial.println("CLOUD: starting background NTP synchronization...");
+    configTime(0, 0, "ntp.aliyun.com", "pool.ntp.org");
+    cloudClockSyncStarted = true;
+  }
+
+  if (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+    return;
+  }
+  const time_t synchronized = time(nullptr);
+  if (synchronized < static_cast<time_t>(MIN_REASONABLE_UNIX_TIME)) {
+    return;
+  }
+
+  // SNTP has already set the system clock. Route the exact timestamp through the
+  // main-loop queue as well so timestamp quality changes on the sampling thread.
+  publishExactClockToMainLoop(static_cast<uint32_t>(synchronized), "NTP");
+}
+
 // Shared by all three calls. Returns the HTTP status, or a negative value on
 // transport failure; the body is appended to `response`.
 int cloudRequest(const char *method, const String &url, const String &body, String *response) {
+  // Modem sleep is useful between polls, but on a busy BLE/Wi-Fi coexistence
+  // radio it can starve the first TLS handshake long enough for HTTPClient to
+  // report a connection refusal. Keep the radio awake only for the request;
+  // cloudTask already suspends all HTTPS work while a BLE client is connected.
+  WiFi.setSleep(false);
+
   WiFiClientSecure client;
   // The device has no CA bundle and no reliable wall clock before the first time
   // sync, so certificate validation cannot be performed here. The link is still
   // encrypted; the auth token is what proves the caller's identity to the cloud.
   client.setInsecure();
   client.setTimeout(CLOUD_HTTP_TIMEOUT_MS / 1000);
+  client.setHandshakeTimeout(CLOUD_TLS_HANDSHAKE_TIMEOUT_SECONDS);
 
   HTTPClient http;
   if (!http.begin(client, url)) {
+    WiFi.setSleep(true);
     return -1;
   }
   http.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
@@ -1065,8 +1522,21 @@ int cloudRequest(const char *method, const String &url, const String &body, Stri
 
   if (status > 0 && response != nullptr) {
     *response = http.getString();
+  } else if (status < 0) {
+    char tlsError[160] = {};
+    const int tlsErrorCode = client.lastError(tlsError, sizeof(tlsError));
+    Serial.printf(
+      "CLOUD: transport error %d (%s), TLS %d (%s), RSSI %d dBm, free heap %u.\n",
+      status,
+      HTTPClient::errorToString(status).c_str(),
+      tlsErrorCode,
+      tlsError,
+      WiFi.RSSI(),
+      ESP.getFreeHeap()
+    );
   }
   http.end();
+  WiFi.setSleep(true);
   return status;
 }
 
@@ -1119,6 +1589,60 @@ bool jsonBoolIsTrue(const String &source, const char *key) {
   return source.startsWith("true", cursor);
 }
 
+bool extractJSONUnsigned64(const String &source, const char *key, uint64_t *value) {
+  String needle = String("\"") + key + "\"";
+  int keyAt = source.indexOf(needle);
+  if (keyAt < 0) {
+    return false;
+  }
+  int cursor = source.indexOf(':', keyAt + needle.length());
+  if (cursor < 0) {
+    return false;
+  }
+  ++cursor;
+  while (cursor < static_cast<int>(source.length()) && isspace(source[cursor])) {
+    ++cursor;
+  }
+  const int firstDigit = cursor;
+  while (
+    cursor < static_cast<int>(source.length())
+      && source[cursor] >= '0'
+      && source[cursor] <= '9'
+  ) {
+    ++cursor;
+  }
+  if (cursor == firstDigit) {
+    return false;
+  }
+
+  const String number = source.substring(firstDigit, cursor);
+  char *end = nullptr;
+  const unsigned long long parsed = strtoull(number.c_str(), &end, 10);
+  if (end == number.c_str() || *end != '\0') {
+    return false;
+  }
+  *value = static_cast<uint64_t>(parsed);
+  return true;
+}
+
+void updateClockFromCloudResponse(const String &response) {
+  if (cloudClockSynced) {
+    return;
+  }
+  uint64_t serverTimeMs = 0;
+  if (!extractJSONUnsigned64(response, "serverTime", &serverTimeMs)) {
+    return;
+  }
+  const uint64_t serverTimeSeconds = serverTimeMs / 1000ULL;
+  if (serverTimeSeconds > UINT32_MAX) {
+    return;
+  }
+  publishExactClockToMainLoop(
+    static_cast<uint32_t>(serverTimeSeconds),
+    "HTTPS server"
+  );
+}
+
 String cloudEndpoint(const char *suffix) {
   return String(PLANT_CLOUD_BASE_URL) + suffix;
 }
@@ -1136,10 +1660,8 @@ void appendJSONFloat(String *body, const char *name, float value, bool valid) {
   }
 }
 
-bool uploadCloudSample(const String &commandID, const CloudSampleResult &sample) {
-  String body = "{\"commandId\":\"";
-  body += commandID;
-  body += "\",\"reading\":{\"deviceId\":\"";
+String cloudReadingJSON(const CloudSampleResult &sample) {
+  String body = "{\"deviceId\":\"";
   body += PLANT_CLOUD_DEVICE_ID;
   body += "\",\"sequence\":";
   body += String(sample.sequence);
@@ -1156,7 +1678,57 @@ bool uploadCloudSample(const String &commandID, const CloudSampleResult &sample)
   appendJSONFloat(&body, "humidity", sample.humidity, sample.flags & FLAG_SHT31_VALID);
   body += ",";
   appendJSONFloat(&body, "lightLux", sample.lightLux, sample.flags & FLAG_BH1750_VALID);
-  body += "}}";
+  body += "}";
+  return body;
+}
+
+bool uploadCloudHistorySample(const CloudSampleResult &sample) {
+  String body = "{\"sensorReadings\":[";
+  body += cloudReadingJSON(sample);
+  body += "]}";
+
+  String response;
+  const int status = cloudRequest("POST", cloudEndpoint("/sync/push"), body, &response);
+  if (status != 200 || !jsonBoolIsTrue(response, "success")) {
+    Serial.printf(
+      "CLOUD: history sync failed for sequence %lu, HTTP %d; will retry.\n",
+      static_cast<unsigned long>(sample.sequence),
+      status
+    );
+    return false;
+  }
+  Serial.printf(
+    "CLOUD: synced history sequence %lu.\n",
+    static_cast<unsigned long>(sample.sequence)
+  );
+  return true;
+}
+
+bool flushPendingCloudHistory() {
+  if (cloudHistoryUploadQueue == nullptr) {
+    return true;
+  }
+
+  // Drain a short burst after reconnecting without starving command polling.
+  for (uint8_t attempt = 0; attempt < 4; ++attempt) {
+    CloudSampleResult pending = {};
+    if (xQueuePeek(cloudHistoryUploadQueue, &pending, 0) != pdTRUE) {
+      return true;
+    }
+    if (!uploadCloudHistorySample(pending)) {
+      return false;
+    }
+    xQueueReceive(cloudHistoryUploadQueue, &pending, 0);
+  }
+  return true;
+}
+
+bool uploadCloudSample(const String &commandID, const CloudSampleResult &sample) {
+  String body = "{\"commandId\":\"";
+  body += commandID;
+  body += "\",\"reading\":";
+  body += cloudReadingJSON(sample);
+  body += "}";
 
   String response;
   const int status = cloudRequest("POST", cloudEndpoint("/command/respond"), body, &response);
@@ -1187,6 +1759,7 @@ bool runCloudPollCycle() {
     Serial.printf("CLOUD: poll failed, HTTP %d.\n", status);
     return false;
   }
+  updateClockFromCloudResponse(response);
   if (!jsonBoolIsTrue(response, "hasCommand")) {
     return true;  // idle, nothing to do
   }
@@ -1223,8 +1796,22 @@ void cloudTask(void *) {
   vTaskDelay(pdMS_TO_TICKS(5000));
 
   for (;;) {
+    // BLE is an intentionally exclusive local maintenance channel. Remote
+    // commands can wait until it disconnects; continuing HTTPS/TLS work while a
+    // client downloads history is what previously made notifications stall.
+    if (clientConnected) {
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
     if (!ensureWiFiConnected()) {
       vTaskDelay(pdMS_TO_TICKS(CLOUD_WIFI_RETRY_MS));
+      continue;
+    }
+    // NTP is best-effort. HTTPS uses the existing estimated clock safely, so a
+    // network that blocks UDP/123 must not disable remote sampling.
+    updateClockFromNTP();
+    if (!flushPendingCloudHistory()) {
+      vTaskDelay(pdMS_TO_TICKS(CLOUD_POLL_BACKOFF_MS));
       continue;
     }
     const bool ok = runCloudPollCycle();
@@ -1239,10 +1826,29 @@ void initializeCloudTask() {
   }
 
   cloudSampleMutex = xSemaphoreCreateMutex();
-  if (cloudSampleMutex == nullptr) {
-    Serial.println("CLOUD: could not create sample mutex; remote sampling disabled.");
+  cloudHistoryUploadQueue = xQueueCreate(
+    CLOUD_HISTORY_UPLOAD_QUEUE_DEPTH,
+    sizeof(CloudSampleResult)
+  );
+  if (cloudSampleMutex == nullptr || cloudHistoryUploadQueue == nullptr) {
+    Serial.println("CLOUD: could not create sample delivery state; remote sampling disabled.");
+    if (cloudSampleMutex != nullptr) {
+      vSemaphoreDelete(cloudSampleMutex);
+      cloudSampleMutex = nullptr;
+    }
+    if (cloudHistoryUploadQueue != nullptr) {
+      vQueueDelete(cloudHistoryUploadQueue);
+      cloudHistoryUploadQueue = nullptr;
+    }
     return;
   }
+
+  WiFi.onEvent(
+    [](WiFiEvent_t, WiFiEventInfo_t info) {
+      cloudLastWiFiDisconnectReason = info.wifi_sta_disconnected.reason;
+    },
+    WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED
+  );
 
   const BaseType_t created = xTaskCreatePinnedToCore(
     cloudTask,
@@ -1257,6 +1863,8 @@ void initializeCloudTask() {
     Serial.println("CLOUD: could not start poll task; remote sampling disabled.");
     vSemaphoreDelete(cloudSampleMutex);
     cloudSampleMutex = nullptr;
+    vQueueDelete(cloudHistoryUploadQueue);
+    cloudHistoryUploadQueue = nullptr;
     return;
   }
   Serial.printf(
@@ -1267,44 +1875,40 @@ void initializeCloudTask() {
 }
 #endif
 
-static const uint8_t LED_PINS[] = {2, 4, 5, 12, 13, 14, 15, 18, 23};
-
-void wifiLedTask(void *) {
-  for (uint8_t pin : LED_PINS) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
-  }
-  bool ledState = false;
-  for (;;) {
+// Reflect physical Wi-Fi association without blocking the Arduino loop:
+// searching/retrying flashes slowly, while an associated station stays lit.
+// The LED intentionally follows Wi-Fi itself, not cloud HTTP success.
+void updateWiFiStatusLED(unsigned long now) {
 #if PLANT_CLOUD_ENABLED
-    if (WiFi.status() == WL_CONNECTED) {
-      // 常亮 (同时给 HIGH，若是共阳极低电平驱动则反向交替)
-      for (uint8_t pin : LED_PINS) {
-        digitalWrite(pin, HIGH);
-      }
-      vTaskDelay(pdMS_TO_TICKS(200));
-    } else {
-      // 慢闪 (500ms 亮 / 500ms 灭)
-      ledState = !ledState;
-      for (uint8_t pin : LED_PINS) {
-        digitalWrite(pin, ledState ? HIGH : LOW);
-      }
-      vTaskDelay(pdMS_TO_TICKS(500));
-    }
-#else
-    for (uint8_t pin : LED_PINS) {
-      digitalWrite(pin, LOW);
-    }
-    vTaskDelay(pdMS_TO_TICKS(1000));
-#endif
+  static unsigned long lastToggleAt = 0;
+  static bool isOn = false;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    isOn = true;
+    lastToggleAt = now;
+    digitalWrite(STATUS_LED_PIN, STATUS_LED_ON_LEVEL);
+    return;
   }
+
+  if (lastToggleAt == 0 || now - lastToggleAt >= WIFI_SEARCH_LED_TOGGLE_MS) {
+    lastToggleAt = now;
+    isOn = !isOn;
+    digitalWrite(
+      STATUS_LED_PIN,
+      isOn ? STATUS_LED_ON_LEVEL : STATUS_LED_OFF_LEVEL
+    );
+  }
+#else
+  digitalWrite(STATUS_LED_PIN, STATUS_LED_OFF_LEVEL);
+#endif
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  xTaskCreate(wifiLedTask, "wifiLedTask", 2048, nullptr, 1, nullptr);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, STATUS_LED_OFF_LEVEL);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(100000);
@@ -1340,6 +1944,7 @@ void setup() {
 }
 
 void loop() {
+  updateWiFiStatusLED(millis());
   restartAdvertisingAfterDisconnect();
   processControlCommands();
 

@@ -1,4 +1,37 @@
-2026-07-17 18:39:42 CST
+2026-07-28 19:35:24 CST
+
+# History Overview 传感器详情下拉云同步
+
+## What changed
+
+- `DetailView` 的下拉刷新先调用 `CloudSyncService.sync(database:)`，再重新查询
+  日汇总，因此 Web 或 ESP32 通过云端写入的传感器记录可在当前页面收敛。
+- 任务被取消时不再继续发起页面重载。
+
+## Why
+
+原来的 `.refreshable` 只重查本机 SQLite。即使 ESP32 已经通过 Wi-Fi 把五分钟
+读数写到云端，详情页下拉也不会主动拉取这些记录，看起来就像 iOS 同步失效。
+
+## Safe to modify
+
+- 同步完成后的本地查询、加载提示和错误文案可以独立调整。
+- 其他详情 Tab 可复用相同的“先云同步、后查询”顺序。
+
+## Risky areas
+
+- 不要把本地查询移到云同步之前，否则本次手势仍可能展示旧快照。
+- 不要在 `DetailView` 创建另一套同步服务或数据库实例；必须继续使用共享服务和
+  当前环境中的 `PlantDatabase`。
+
+## Assumptions and constraints
+
+- 云同步 URL、鉴权令牌和设备 ID 已在 App 设置中配置。
+- 本次按要求只修改源代码，没有构建、启动或验证 iOS App。
+
+## Suggested next improvement
+
+- 在传感器详情页显示最近一次云同步摘要或错误，让下拉后的结果更可诊断。
 
 # ESP32 历史数据批次完整性修复
 

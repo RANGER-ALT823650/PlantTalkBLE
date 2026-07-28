@@ -57,6 +57,14 @@ final class PlantRemoteSamplingTests: XCTestCase {
         XCTAssertEqual(config.deviceID, PlantRemoteSampling.fallbackDeviceID)
     }
 
+    func testLogicalDeviceIDDoesNotDependOnCloudCredentials() {
+        let defaults = makeDefaults(url: nil, token: nil, deviceID: "balcony-01")
+        XCTAssertEqual(
+            PlantRemoteSampling.configuredDeviceID(from: defaults),
+            "balcony-01"
+        )
+    }
+
     // MARK: - 状态判定
 
     func testCompletedStatusYieldsReading() throws {

@@ -537,6 +537,82 @@ final class PlantDatabaseTests: XCTestCase {
         )
     }
 
+    func testMigrationRepairsOnlyFutureEstimatedUTCPlusEightSensorTimestamps() throws {
+        let path = temporaryDatabasePath()
+        let queue = try DatabaseQueue(path: path)
+        try PlantDatabase.migratorForTests.migrate(
+            queue,
+            upTo: "canonicalize tombstone ids"
+        )
+        let receivedAt = Date(timeIntervalSince1970: 1_785_222_554)
+        let expectedRecordedAt = receivedAt.addingTimeInterval(-40 * 60)
+
+        try queue.write { db in
+            for (
+                sequence,
+                recordedAt,
+                estimated
+            ) in [
+                (
+                    1_785_251_067,
+                    expectedRecordedAt.addingTimeInterval(8 * 60 * 60),
+                    true
+                ),
+                (
+                    1_785_251_068,
+                    receivedAt.addingTimeInterval(-5 * 60),
+                    true
+                ),
+                (
+                    1_785_251_069,
+                    receivedAt.addingTimeInterval(8 * 60 * 60),
+                    false
+                )
+            ] {
+                try db.execute(
+                    sql: """
+                        INSERT INTO sensor_readings (
+                            device_id, sequence, recorded_at, received_at,
+                            timestamp_estimated, soil_raw
+                        ) VALUES ('default_device', ?, ?, ?, ?, 2000)
+                        """,
+                    arguments: [sequence, recordedAt, receivedAt, estimated]
+                )
+            }
+        }
+
+        try PlantDatabase.migratorForTests.migrate(queue)
+
+        let rows = try queue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT sequence, recorded_at
+                    FROM sensor_readings
+                    ORDER BY sequence
+                    """
+            )
+        }
+        let repairedDate: Date = rows[0]["recorded_at"]
+        let plausibleDate: Date = rows[1]["recorded_at"]
+        let exactDate: Date = rows[2]["recorded_at"]
+        XCTAssertEqual(
+            repairedDate.timeIntervalSince1970,
+            expectedRecordedAt.timeIntervalSince1970,
+            accuracy: 1
+        )
+        XCTAssertEqual(
+            plausibleDate.timeIntervalSince1970,
+            receivedAt.addingTimeInterval(-5 * 60).timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            exactDate.timeIntervalSince1970,
+            receivedAt.addingTimeInterval(8 * 60 * 60).timeIntervalSince1970,
+            accuracy: 0.001
+        )
+    }
+
     private func temporaryDatabasePath() -> String {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".sqlite")
@@ -771,6 +847,78 @@ final class PlantDatabaseTests: XCTestCase {
         XCTAssertEqual(updated?.map(\.sequence), [1])
     }
 
+    func testFutureEstimatedBatchKeepsCadenceWhenReanchored() {
+        let receivedAt = Date(timeIntervalSince1970: 1_000)
+        let readings = [
+            HistoryReading(
+                sequence: 1,
+                recordedAt: Date(timeIntervalSince1970: 1_600),
+                timestampEstimated: true,
+                soilRaw: 0,
+                temperature: 25,
+                humidity: 60,
+                lightLux: 200
+            ),
+            HistoryReading(
+                sequence: 2,
+                recordedAt: Date(timeIntervalSince1970: 1_900),
+                timestampEstimated: true,
+                soilRaw: 0,
+                temperature: 25,
+                humidity: 60,
+                lightLux: 200
+            )
+        ]
+
+        let repaired = PlantDatabase.reanchorFutureEstimatedReadings(
+            readings,
+            receivedAt: receivedAt
+        )
+
+        XCTAssertEqual(repaired[0].recordedAt.timeIntervalSince1970, 700, accuracy: 0.001)
+        XCTAssertEqual(repaired[1].recordedAt.timeIntervalSince1970, 1_000, accuracy: 0.001)
+        XCTAssertEqual(
+            repaired[1].recordedAt.timeIntervalSince(repaired[0].recordedAt),
+            300,
+            accuracy: 0.001
+        )
+    }
+
+    func testRemoteCorrectionUpdatesExistingSensorTimestamp() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let wrong = SyncSensorReading(
+            deviceId: "default_device",
+            sequence: 42,
+            recordedAt: 1_900_000,
+            receivedAt: 1_900_000,
+            timestampEstimated: true,
+            soilRaw: 0,
+            temperature: 25,
+            humidity: 60,
+            lightLux: 200
+        )
+        let corrected = SyncSensorReading(
+            deviceId: "default_device",
+            sequence: 42,
+            recordedAt: 1_000_000,
+            receivedAt: 1_000_000,
+            timestampEstimated: true,
+            soilRaw: 0,
+            temperature: 25,
+            humidity: 60,
+            lightLux: 200
+        )
+
+        let firstInsertCount = try await database.insertRemoteSensorReadings([wrong])
+        let correctionInsertCount = try await database.insertRemoteSensorReadings([corrected])
+        XCTAssertEqual(firstInsertCount, 1)
+        XCTAssertEqual(correctionInsertCount, 0)
+
+        let storedReadings = try await database.allHistoryReadings()
+        let stored = try XCTUnwrap(storedReadings.first)
+        XCTAssertEqual(stored.recordedAt.timeIntervalSince1970, 1_000, accuracy: 0.001)
+    }
+
     func testBatchSaveIsIdempotentAndAdvancesCursor() async throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".sqlite")
@@ -822,6 +970,56 @@ final class PlantDatabaseTests: XCTestCase {
         let dailyReadings = try await database.historyReadings(for: dayStart)
         XCTAssertEqual(dailyReadings.map(\.sequence), [11, 10])
         XCTAssertEqual(storedReadings.first?.lightLux, 500)
+    }
+
+    func testBLETransportRowsMigrateToSharedLogicalDeviceID() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".sqlite")
+            .path
+        let database = try PlantDatabase(path: path)
+        let transportID = "CORE-BLUETOOTH-UUID"
+        let logicalID = "default_device"
+        let first = HistoryReading(
+            sequence: 10,
+            recordedAt: Date(timeIntervalSince1970: 1_750_000_000),
+            timestampEstimated: true,
+            soilRaw: 2000,
+            temperature: 24,
+            humidity: 60,
+            lightLux: 300
+        )
+        let second = HistoryReading(
+            sequence: 11,
+            recordedAt: Date(timeIntervalSince1970: 1_750_000_300),
+            timestampEstimated: false,
+            soilRaw: 1990,
+            temperature: 24.1,
+            humidity: 59,
+            lightLux: 310
+        )
+
+        _ = try await database.saveHistoryBatch(
+            [first],
+            deviceID: transportID,
+            acknowledgedThrough: 10
+        )
+        _ = try await database.saveHistoryBatch(
+            [second],
+            deviceID: transportID,
+            acknowledgedThrough: 11,
+            readingDeviceID: logicalID
+        )
+
+        let transportCount = try await database.readingCount(for: transportID)
+        let logicalCount = try await database.readingCount(for: logicalID)
+        let durableCursor = try await database.lastSequence(for: transportID)
+        let syncedDeviceIDs = Set(
+            try await database.allSensorReadingsForSync().map(\.deviceId)
+        )
+        XCTAssertEqual(transportCount, 0)
+        XCTAssertEqual(logicalCount, 2)
+        XCTAssertEqual(durableCursor, 11)
+        XCTAssertEqual(syncedDeviceIDs, [logicalID])
     }
 
     func testHistoryDeletionSupportsSingleReadingDayAndClearAll() async throws {

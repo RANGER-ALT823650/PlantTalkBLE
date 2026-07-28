@@ -65,6 +65,16 @@ enum PlantRemoteSampling {
         let deviceID: String
     }
 
+    /// Stable application-level identity shared by ESP32, iOS, Web and cloud.
+    /// CoreBluetooth's peripheral UUID is only a local transport cursor.
+    static func configuredDeviceID(
+        from defaults: UserDefaults = .standard
+    ) -> String {
+        let configured = (defaults.string(forKey: deviceIDDefaultsKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return configured.isEmpty ? fallbackDeviceID : configured
+    }
+
     /// 从 UserDefaults 读取配置。地址或密钥缺失时返回 nil —— 云端强制校验
     /// AUTH_TOKEN，没有密钥的请求一定被拒，不如在这里就说清楚。
     static func loadConfiguration(
@@ -80,12 +90,10 @@ enum PlantRemoteSampling {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { return nil }
 
-        let configured = (defaults.string(forKey: deviceIDDefaultsKey) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         return Configuration(
             baseURL: baseURL,
             token: token,
-            deviceID: configured.isEmpty ? fallbackDeviceID : configured
+            deviceID: configuredDeviceID(from: defaults)
         )
     }
 

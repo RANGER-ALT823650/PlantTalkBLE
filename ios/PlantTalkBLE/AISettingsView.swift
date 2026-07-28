@@ -740,7 +740,7 @@ struct CloudSyncSettingsView: View {
                     }
                 } label: {
                     HStack {
-                        Label(syncService.isSyncing ? "正在同步…" : "立即同步消息", systemImage: "arrow.triangle.2.circlepath")
+                        Label(syncService.isSyncing ? "正在同步…" : "立即同步全部数据", systemImage: "arrow.triangle.2.circlepath")
                         if syncService.isSyncing {
                             Spacer()
                             ProgressView()

@@ -68,7 +68,7 @@ struct DetailView: View {
                     }
                 }
                 .refreshable {
-                    await loadAll()
+                    await syncCloudAndReload()
                 }
             }
         }
@@ -133,6 +133,14 @@ struct DetailView: View {
 
     private func loadAll() async {
         await loadSummaries()
+    }
+
+    private func syncCloudAndReload() async {
+        // Pull-to-refresh is an explicit request for cross-device convergence:
+        // sync first so the subsequent summary query includes Web/ESP32 rows.
+        await CloudSyncService.shared.sync(database: database)
+        guard !Task.isCancelled else { return }
+        await loadAll()
     }
 
     private var todaySummary: DailySummary? {

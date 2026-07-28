@@ -30,6 +30,19 @@ struct HistoryReading: Equatable, Sendable {
         self.lightLux = lightLux
         self.databaseID = databaseID
     }
+
+    fileprivate func replacingRecordedAt(_ date: Date) -> HistoryReading {
+        HistoryReading(
+            sequence: sequence,
+            recordedAt: date,
+            timestampEstimated: timestampEstimated,
+            soilRaw: soilRaw,
+            temperature: temperature,
+            humidity: humidity,
+            lightLux: lightLux,
+            databaseID: databaseID
+        )
+    }
 }
 
 struct SyncSensorReading: Codable, Equatable, Sendable {
@@ -153,6 +166,7 @@ enum PlantDatabaseError: LocalizedError, Equatable {
 /// SQLite work on CoreBluetooth's main-actor callbacks.
 actor PlantDatabase {
     private let writer: DatabasePool
+    private static let estimatedFutureTolerance: TimeInterval = 5 * 60
 
     init(path: String) throws {
         var configuration = Configuration()
@@ -176,6 +190,49 @@ actor PlantDatabase {
         ).appendingPathComponent("PlantTalk", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return try PlantDatabase(path: directory.appendingPathComponent("plant-talk.sqlite").path)
+    }
+
+    /// ESP32 estimated timestamps preserve cadence but may share one incorrect
+    /// clock offset. Re-anchor only contiguous future runs and move each run as
+    /// a unit, so a 5-minute series does not collapse into duplicate timestamps.
+    static func reanchorFutureEstimatedReadings(
+        _ readings: [HistoryReading],
+        receivedAt: Date
+    ) -> [HistoryReading] {
+        var adjusted = readings
+        var index = 0
+
+        while index < adjusted.count {
+            guard adjusted[index].timestampEstimated else {
+                index += 1
+                continue
+            }
+
+            let start = index
+            index += 1
+            while index < adjusted.count,
+                  adjusted[index].timestampEstimated,
+                  adjusted[index - 1].sequence < UInt32.max,
+                  adjusted[index].sequence == adjusted[index - 1].sequence + 1 {
+                index += 1
+            }
+
+            let end = index
+            let newest = adjusted[start..<end]
+                .map(\.recordedAt)
+                .max() ?? receivedAt
+            guard newest > receivedAt.addingTimeInterval(estimatedFutureTolerance) else {
+                continue
+            }
+
+            let shift = newest.timeIntervalSince(receivedAt)
+            for readingIndex in start..<end {
+                adjusted[readingIndex] = adjusted[readingIndex].replacingRecordedAt(
+                    adjusted[readingIndex].recordedAt.addingTimeInterval(-shift)
+                )
+            }
+        }
+        return adjusted
     }
 
     func lastSequence(for deviceID: String) async throws -> UInt32 {
@@ -985,11 +1042,28 @@ actor PlantDatabase {
                     device_id, sequence, recorded_at, received_at,
                     timestamp_estimated, soil_raw, temperature, humidity, light_lux
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(device_id, sequence) DO NOTHING
+                ON CONFLICT(device_id, sequence) DO UPDATE SET
+                    recorded_at = excluded.recorded_at,
+                    received_at = excluded.received_at,
+                    timestamp_estimated = excluded.timestamp_estimated,
+                    soil_raw = excluded.soil_raw,
+                    temperature = excluded.temperature,
+                    humidity = excluded.humidity,
+                    light_lux = excluded.light_lux
                 """)
             for r in readings {
                 let recDate = Date(timeIntervalSince1970: Double(r.recordedAt) / 1000.0)
                 let rcvDate = Date(timeIntervalSince1970: Double(r.receivedAt ?? r.recordedAt) / 1000.0)
+                let existed = try Bool.fetchOne(
+                    db,
+                    sql: """
+                        SELECT EXISTS(
+                            SELECT 1 FROM sensor_readings
+                            WHERE device_id = ? AND sequence = ?
+                        )
+                        """,
+                    arguments: [r.deviceId, r.sequence]
+                ) ?? false
                 try statement.execute(arguments: [
                     r.deviceId,
                     r.sequence,
@@ -1001,7 +1075,9 @@ actor PlantDatabase {
                     r.humidity,
                     r.lightLux
                 ])
-                insertedCount += db.changesCount
+                if !existed {
+                    insertedCount += 1
+                }
             }
             return insertedCount
         }
@@ -1234,9 +1310,35 @@ actor PlantDatabase {
     func saveHistoryBatch(
         _ readings: [HistoryReading],
         deviceID: String,
-        acknowledgedThrough sequence: UInt32
+        acknowledgedThrough sequence: UInt32,
+        readingDeviceID: String? = nil
     ) async throws -> HistorySaveResult {
         try await writer.write { db in
+            let logicalDeviceID = readingDeviceID ?? deviceID
+
+            // Older builds stored history under CoreBluetooth's phone-local UUID.
+            // Merge that transport-scoped data into the shared device identity
+            // before saving this batch. Existing cloud rows win on duplicates.
+            if logicalDeviceID != deviceID {
+                try db.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO sensor_readings (
+                            device_id, sequence, recorded_at, received_at,
+                            timestamp_estimated, soil_raw, temperature, humidity, light_lux
+                        )
+                        SELECT ?, sequence, recorded_at, received_at,
+                               timestamp_estimated, soil_raw, temperature, humidity, light_lux
+                        FROM sensor_readings
+                        WHERE device_id = ?
+                        """,
+                    arguments: [logicalDeviceID, deviceID]
+                )
+                try db.execute(
+                    sql: "DELETE FROM sensor_readings WHERE device_id = ?",
+                    arguments: [deviceID]
+                )
+            }
+
             var insertedCount = 0
             let statement = try db.makeStatement(sql: """
                 INSERT INTO sensor_readings (
@@ -1246,10 +1348,14 @@ actor PlantDatabase {
                 ON CONFLICT(device_id, sequence) DO NOTHING
                 """)
             let receivedAt = Date()
+            let normalizedReadings = Self.reanchorFutureEstimatedReadings(
+                readings,
+                receivedAt: receivedAt
+            )
 
-            for reading in readings {
+            for reading in normalizedReadings {
                 try statement.execute(arguments: [
-                    deviceID,
+                    logicalDeviceID,
                     Int64(reading.sequence),
                     reading.recordedAt,
                     receivedAt,
@@ -1495,6 +1601,22 @@ actor PlantDatabase {
                     pending_push = pending_push OR excluded.pending_push
                 """)
             try db.execute(sql: "DELETE FROM sync_tombstones WHERE entity_id <> LOWER(entity_id)")
+        }
+        migrator.registerMigration("repair UTC+8 estimated sensor timestamps") { db in
+            // Older ESP32 builds interpreted the China-local compiler clock as
+            // UTC until iPhone/NTP synchronization. Limit the repair to
+            // explicitly estimated rows that arrived more than five minutes in
+            // the future and become plausible after removing exactly UTC+8.
+            // Exact timestamps and already-plausible estimates are untouched.
+            try db.execute(sql: """
+                UPDATE sensor_readings
+                SET recorded_at = DATETIME(recorded_at, '-8 hours')
+                WHERE timestamp_estimated = 1
+                  AND sequence >= 1704067200
+                  AND recorded_at > DATETIME(received_at, '+5 minutes')
+                  AND DATETIME(recorded_at, '-8 hours')
+                        <= DATETIME(received_at, '+5 minutes')
+                """)
         }
         return migrator
     }
