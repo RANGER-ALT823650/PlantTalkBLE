@@ -75,10 +75,9 @@ struct ConversationListView: View {
                 await loadConversations()
             }
         }
-        .confirmationDialog(
+        .alert(
             "删除这条文字会话？",
-            isPresented: deletionConfirmationPresented,
-            titleVisibility: .visible
+            isPresented: deletionConfirmationPresented
         ) {
             Button("删除", role: .destructive) {
                 if let conversationPendingDeletion {

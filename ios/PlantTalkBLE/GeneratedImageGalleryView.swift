@@ -3,7 +3,8 @@ import UIKit
 
 @MainActor
 struct GeneratedImageGalleryView: View {
-    let onApplyToPlantCard: (UIImage) -> Void
+    let onApplyToPlantCard: (GeneratedPlantImage) -> Void
+    let onDeleteGeneratedImage: (String) -> Void
 
     @State private var images: [GeneratedPlantImage] = []
     @State private var isLoading = true
@@ -59,10 +60,9 @@ struct GeneratedImageGalleryView: View {
                 .transition(.identity)
             }
         }
-        .confirmationDialog(
+        .alert(
             "删除这张 AI 图片？",
-            isPresented: deletionConfirmationPresented,
-            titleVisibility: .visible
+            isPresented: deletionConfirmationPresented
         ) {
             Button("删除", role: .destructive) {
                 if let imagePendingDeletion {
@@ -130,7 +130,7 @@ struct GeneratedImageGalleryView: View {
     }
 
     private func applyToPlantCard(_ item: GeneratedPlantImage) {
-        onApplyToPlantCard(item.image)
+        onApplyToPlantCard(item)
     }
 
     private func deleteImage(_ item: GeneratedPlantImage) {
@@ -140,6 +140,7 @@ struct GeneratedImageGalleryView: View {
         }
         images.removeAll { $0.id == item.id }
         GeneratedPlantImageStorage.delete(id: item.id)
+        onDeleteGeneratedImage(item.id)
     }
 
     private func presentImagePreview(

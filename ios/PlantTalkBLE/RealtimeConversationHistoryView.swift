@@ -75,10 +75,9 @@ struct RealtimeConversationHistoryView: View {
                 await loadConversations()
             }
         }
-        .confirmationDialog(
+        .alert(
             "删除这条实时语音会话？",
-            isPresented: deletionConfirmationPresented,
-            titleVisibility: .visible
+            isPresented: deletionConfirmationPresented
         ) {
             Button("删除", role: .destructive) {
                 if let conversationPendingDeletion {

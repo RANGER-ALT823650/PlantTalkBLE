@@ -7,6 +7,19 @@ struct PlantArtwork {
     let image: UIImage
     let scale: CGFloat
     let normalizedOffset: CGSize
+    let sourceGeneratedImageID: String?
+
+    init(
+        image: UIImage,
+        scale: CGFloat,
+        normalizedOffset: CGSize,
+        sourceGeneratedImageID: String? = nil
+    ) {
+        self.image = image
+        self.scale = scale
+        self.normalizedOffset = normalizedOffset
+        self.sourceGeneratedImageID = sourceGeneratedImageID
+    }
 }
 
 // MARK: - Generation mask
@@ -300,6 +313,7 @@ enum PlantArtworkStorage {
         let scale: Double
         let offsetX: Double
         let offsetY: Double
+        let sourceGeneratedImageID: String?
     }
 
     private static let directoryName = "PlantArtwork"
@@ -322,7 +336,8 @@ enum PlantArtworkStorage {
             normalizedOffset: CGSize(
                 width: CGFloat(metadata.offsetX),
                 height: CGFloat(metadata.offsetY)
-            )
+            ),
+            sourceGeneratedImageID: metadata.sourceGeneratedImageID
         )
     }
 
@@ -338,7 +353,8 @@ enum PlantArtworkStorage {
         let metadata = Metadata(
             scale: Double(artwork.scale),
             offsetX: Double(artwork.normalizedOffset.width),
-            offsetY: Double(artwork.normalizedOffset.height)
+            offsetY: Double(artwork.normalizedOffset.height),
+            sourceGeneratedImageID: artwork.sourceGeneratedImageID
         )
 
         do {
@@ -708,11 +724,12 @@ struct PlantArtworkControl: View {
                 )
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
-                GeneratedPlantImageStorage.save(generated)
+                let savedGeneratedImage = GeneratedPlantImageStorage.save(generated)
                 artwork = PlantArtwork(
                     image: generated,
                     scale: request.scale,
-                    normalizedOffset: request.normalizedOffset
+                    normalizedOffset: request.normalizedOffset,
+                    sourceGeneratedImageID: savedGeneratedImage?.id
                 )
                 finishGeneration(generationID)
             } catch is CancellationError {
@@ -1255,7 +1272,8 @@ private struct PlantArtworkEditorView: View {
             normalizedOffset: PlantArtworkCrop.normalizedOffset(
                 from: clampedOffset,
                 in: CGSize(width: 320, height: 426.666)
-            )
+            ),
+            sourceGeneratedImageID: draft.artwork.sourceGeneratedImageID
         )
         dismiss()
     }

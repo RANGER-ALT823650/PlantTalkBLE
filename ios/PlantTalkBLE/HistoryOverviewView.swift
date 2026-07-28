@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct HistoryOverviewView: View {
     let database: PlantDatabase
@@ -7,7 +6,8 @@ struct HistoryOverviewView: View {
     let onContinueTextConversation: (AIConversation, [ChatMessage]) -> Void
     let onContinueRealtimeConversation: (AIConversation, [ChatMessage]) -> Void
     let onDetailPresentationChanged: (Bool) -> Void
-    let onApplyGeneratedImageToPlantCard: (UIImage) -> Void
+    let onApplyGeneratedImageToPlantCard: (GeneratedPlantImage) -> Void
+    let onDeleteGeneratedImage: (String) -> Void
     var body: some View {
         TabView(selection: $selectedTab) {
             DetailView(
@@ -40,7 +40,8 @@ struct HistoryOverviewView: View {
                 }
 
             GeneratedImageGalleryView(
-                onApplyToPlantCard: onApplyGeneratedImageToPlantCard
+                onApplyToPlantCard: onApplyGeneratedImageToPlantCard,
+                onDeleteGeneratedImage: onDeleteGeneratedImage
             )
                 .tag(HistoryTab.generatedImages)
                 .tabItem {

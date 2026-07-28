@@ -78,10 +78,9 @@ struct DetailView: View {
         .task {
             await loadSummaries()
         }
-        .confirmationDialog(
+        .alert(
             "删除这一天的传感器记录？",
-            isPresented: dayDeletionConfirmationPresented,
-            titleVisibility: .visible
+            isPresented: dayDeletionConfirmationPresented
         ) {
             Button("删除", role: .destructive) {
                 if let dayPendingDeletion {

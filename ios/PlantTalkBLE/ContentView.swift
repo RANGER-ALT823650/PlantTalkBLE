@@ -389,7 +389,8 @@ struct ContentView: View {
                             onDetailPresentationChanged: { isPresented in
                                 isHistoryDetailPresented = isPresented
                             },
-                            onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard
+                            onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard,
+                            onDeleteGeneratedImage: removeGeneratedImageFromPlantCardIfNeeded
                         )
                             .background(Color(uiColor: .systemBackground))
                             .toolbar {
@@ -564,12 +565,18 @@ struct ContentView: View {
         reduceMotion ? .opacity : .move(edge: .leading)
     }
 
-    private func applyGeneratedImageToPlantCard(_ image: UIImage) {
+    private func applyGeneratedImageToPlantCard(_ item: GeneratedPlantImage) {
         plantArtworkBinding.wrappedValue = PlantArtwork(
-            image: image,
+            image: item.image,
             scale: 1,
-            normalizedOffset: .zero
+            normalizedOffset: .zero,
+            sourceGeneratedImageID: item.id
         )
+    }
+
+    private func removeGeneratedImageFromPlantCardIfNeeded(_ imageID: String) {
+        guard plantArtwork?.sourceGeneratedImageID == imageID else { return }
+        plantArtworkBinding.wrappedValue = nil
     }
 
     private var plantArtworkBinding: Binding<PlantArtwork?> {
