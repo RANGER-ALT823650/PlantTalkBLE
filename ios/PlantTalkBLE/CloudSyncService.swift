@@ -39,12 +39,14 @@ final class CloudSyncService: ObservableObject {
         let conversations: [ConvDTO]
         let messages: [MsgDTO]
         let deletions: [DeletionDTO]
-        let sensorReadings: [PlantDatabase.SyncSensorReading]?
-        let sensor_readings: [PlantDatabase.SyncSensorReading]?
+        let sensorReadings: [SyncSensorReading]?
+        let sensor_readings: [SyncSensorReading]?
     }
 
     struct SyncPushResponse: Decodable {
         let success: Bool?
+        /// 云端实际写入的读数条数。缺表时为 0，摘要要按它报而不是按发送量报。
+        let sensor_readings_count: Int?
         let deletions_supported: Bool?
         let deletions_hint: String?
         let error: String?
@@ -78,8 +80,8 @@ final class CloudSyncService: ObservableObject {
         let conversations: [ConvDTO]?
         let messages: [MsgDTO]?
         let deletions: [DeletionDTO]?
-        let sensorReadings: [PlantDatabase.SyncSensorReading]?
-        let sensor_readings: [PlantDatabase.SyncSensorReading]?
+        let sensorReadings: [SyncSensorReading]?
+        let sensor_readings: [SyncSensorReading]?
         let deletions_supported: Bool?
         let deletions_hint: String?
         let error: String?
@@ -92,6 +94,10 @@ final class CloudSyncService: ObservableObject {
         var removedConversations = 0
         var removedMessages = 0
         var warning: String?
+        /// 云端此刻持有的记录清单（规范小写 ID），供随后的推送算增量。
+        var conversationIDs: Set<String> = []
+        var messageIDs: Set<String> = []
+        var readingKeys: Set<String> = []
     }
 
     /// 执行云端同步（先 Pull 并应用远端删除，再 Push 本地新增与删除意图）
@@ -136,8 +142,16 @@ final class CloudSyncService: ObservableObject {
                 guard initialConvIDs.contains(conv.id), !locallyDeletedConvIDs.contains(conv.id) else {
                     continue
                 }
+                let msgs = try await database.chatMessages(conversationID: conv.id)
+                let newMsgs = msgs.filter { !pulled.messageIDs.contains(Self.syncID($0.id)) }
+                // 云端已有这条会话、且名下消息一条不缺时，本次没有增量可传。
+                // 整表重传会让"上传 115 条会话"每次都出现，用户无从判断真实变化。
+                if newMsgs.isEmpty, pulled.conversationIDs.contains(Self.syncID(conv.id)) {
+                    continue
+                }
+
                 pushConvs.append(SyncPushRequest.ConvDTO(
-                    id: conv.id.uuidString,
+                    id: Self.syncID(conv.id),
                     title: conv.title,
                     kind: conv.kind.rawValue,
                     deviceId: nil,
@@ -145,11 +159,10 @@ final class CloudSyncService: ObservableObject {
                     updatedAt: Self.milliseconds(conv.updatedAt)
                 ))
 
-                let msgs = try await database.chatMessages(conversationID: conv.id)
-                for msg in msgs {
+                for msg in newMsgs {
                     pushMsgs.append(SyncPushRequest.MsgDTO(
-                        id: msg.id.uuidString,
-                        conversation_id: conv.id.uuidString,
+                        id: Self.syncID(msg.id),
+                        conversation_id: Self.syncID(conv.id),
                         role: msg.role.rawValue,
                         text: msg.content,
                         createdAt: Self.milliseconds(msg.createdAt)
@@ -157,9 +170,15 @@ final class CloudSyncService: ObservableObject {
                 }
             }
 
-            let localReadings = (try? await database.allSensorReadingsForSync()) ?? []
+            // 读不出本地读数是真实故障，不能用 try? 咽掉：那样摘要会显示
+            // "上传 0 条读数"，看起来像没有数据而不是同步出了问题。
+            // 只发云端还没有的那些：整表重传会让"上传 1067 条"每次都出现。
+            let localReadings = try await database.allSensorReadingsForSync().filter {
+                !pulled.readingKeys.contains("\($0.deviceId):\($0.sequence)")
+            }
 
             var pushedDeletions = 0
+            var pushedReadings = 0
             var pushWarning: String?
             if !pushConvs.isEmpty || !pushMsgs.isEmpty || !pendingTombstones.isEmpty || !localReadings.isEmpty {
                 let accepted = try await push(
@@ -171,6 +190,7 @@ final class CloudSyncService: ObservableObject {
                     sensorReadings: localReadings
                 )
                 pushWarning = accepted.warning
+                pushedReadings = accepted.storedReadings
                 if accepted.deletionsAccepted {
                     // 只有云端确实收下了墓碑才清 pending，否则下次继续重试
                     try await database.markTombstonesPushed(pendingTombstones)
@@ -181,17 +201,30 @@ final class CloudSyncService: ObservableObject {
             lastSyncedAt = Date()
             lastWarning = pushWarning ?? pulled.warning
 
+            // 摘要只讲真正发生的变化。云端每次回放整张表，把响应长度当成
+            // "同步了多少"会让同一批数字每次都出现，用户无法判断这次动了什么。
             var parts: [String] = []
             if !pushConvs.isEmpty || !pushMsgs.isEmpty {
                 parts.append("上传 \(pushConvs.count) 条会话 / \(pushMsgs.count) 条消息")
             }
+            if pushedReadings > 0 {
+                parts.append("上传 \(pushedReadings) 条传感器读数")
+            }
             if pushedDeletions > 0 {
                 parts.append("同步 \(pushedDeletions) 条删除")
             }
-            parts.append("拉取 \(pulled.conversations) 条会话 / \(pulled.messages) 条消息 / \(pulled.sensorReadings) 条传感器读数")
+            if pulled.conversations > 0 || pulled.messages > 0 {
+                parts.append("新增 \(pulled.conversations) 条会话 / \(pulled.messages) 条消息")
+            }
+            if pulled.sensorReadings > 0 {
+                parts.append("新增 \(pulled.sensorReadings) 条传感器读数")
+            }
             let removed = pulled.removedConversations + pulled.removedMessages
             if removed > 0 {
                 parts.append("本地移除 \(removed) 条已删除记录")
+            }
+            if parts.isEmpty {
+                parts.append("已是最新，无变化")
             }
             lastSyncSummary = parts.joined(separator: "，")
 
@@ -248,9 +281,9 @@ final class CloudSyncService: ObservableObject {
         }
 
         var outcome = try await mergeRemoteData(decoded, into: database)
-        if decoded.deletions_supported == false {
-            outcome.warning = decoded.deletions_hint
-        }
+        // 缺表提示在同步成功时也要显示：否则用户只看到"同步成功"，
+        // 却不知道某类数据其实一条都没进云端。
+        outcome.warning = decoded.deletions_hint
         return outcome
     }
 
@@ -260,8 +293,8 @@ final class CloudSyncService: ObservableObject {
         conversations: [SyncPushRequest.ConvDTO],
         messages: [SyncPushRequest.MsgDTO],
         tombstones: [SyncTombstone],
-        sensorReadings: [PlantDatabase.SyncSensorReading] = []
-    ) async throws -> (deletionsAccepted: Bool, warning: String?) {
+        sensorReadings: [SyncSensorReading] = []
+    ) async throws -> (deletionsAccepted: Bool, storedReadings: Int, warning: String?) {
         let pushURL = url.appendingPathComponent("sync/push")
         var pushRequest = URLRequest(url: pushURL)
         pushRequest.httpMethod = "POST"
@@ -273,8 +306,9 @@ final class CloudSyncService: ObservableObject {
         let deletionDTOs = tombstones.map {
             SyncPushRequest.DeletionDTO(
                 type: $0.type.rawValue,
-                id: $0.entityID,
-                conversationId: $0.conversationID,
+                // 墓碑写库时已折叠成小写，这里再兜一层，防止老库残留的大写写法上传。
+                id: canonicalSyncID($0.entityID),
+                conversationId: $0.conversationID.map(canonicalSyncID),
                 deletedAt: Self.milliseconds($0.deletedAt)
             )
         }
@@ -316,11 +350,23 @@ final class CloudSyncService: ObservableObject {
             )
         }
         let deletionsAccepted = decoded?.deletions_supported != false
-        return (deletionsAccepted, deletionsAccepted ? nil : decoded?.deletions_hint)
+        // 提示与 deletionsAccepted 解耦：读数表缺失时删除照样能同步，
+        // 但缺表这件事仍要告诉用户。
+        return (
+            deletionsAccepted,
+            decoded?.sensor_readings_count ?? sensorReadings.count,
+            decoded?.deletions_hint
+        )
     }
 
     private static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// 把 UUID 编码成云端认可的规范写法（小写）。`UUID.uuidString` 恒为大写，
+    /// 直接上传会和 Web 生成的小写 ID 在云端分裂成两条记录。
+    private static func syncID(_ uuid: UUID) -> String {
+        canonicalSyncID(uuid.uuidString)
     }
 
     private func parseOrMakeUUID(_ string: String) -> UUID {
@@ -349,13 +395,13 @@ final class CloudSyncService: ObservableObject {
         let remoteDeletions: [SyncTombstone] = (response.deletions ?? []).compactMap { dto in
             guard let rawType = dto.type,
                   let type = SyncTombstone.EntityType(rawValue: rawType),
-                  let id = dto.id, !id.isEmpty else {
+                  let id = dto.id, !canonicalSyncID(id).isEmpty else {
                 return nil
             }
             return SyncTombstone(
                 type: type,
-                entityID: id,
-                conversationID: dto.conversationId,
+                entityID: canonicalSyncID(id),
+                conversationID: dto.conversationId.map(canonicalSyncID),
                 deletedAt: Date(timeIntervalSince1970: Double(dto.deletedAt ?? 0) / 1000.0),
                 pendingPush: false
             )
@@ -370,38 +416,54 @@ final class CloudSyncService: ObservableObject {
 
         // 2. 本地墓碑同样要拦住云端数据：离线删除时云端还不知道这些删除
         let localTombstones = try await database.allTombstones()
-        let deletedConvIDs = Set(localTombstones.filter { $0.type == .conversation }.map(\.entityID))
-        let deletedMsgIDs = Set(localTombstones.filter { $0.type == .message }.map(\.entityID))
+        let deletedConvIDs = Set(
+            localTombstones.filter { $0.type == .conversation }.map { canonicalSyncID($0.entityID) }
+        )
+        let deletedMsgIDs = Set(
+            localTombstones.filter { $0.type == .message }.map { canonicalSyncID($0.entityID) }
+        )
 
-        // 按会话 ID 组织消息
+        // 按会话 ID 组织消息。ID 一律折叠成小写：未升级的云端仍可能回传大写写法。
         var msgGroup: [String: [SyncPullResponse.MsgDTO]] = [:]
         for msg in msgs {
-            guard !deletedMsgIDs.contains(msg.id) else { continue }
-            let cId = msg.conversation_id ?? msg.conversationId ?? ""
+            let mId = canonicalSyncID(msg.id)
+            outcome.messageIDs.insert(mId)
+            guard !deletedMsgIDs.contains(mId) else { continue }
+            let cId = canonicalSyncID(msg.conversation_id ?? msg.conversationId ?? "")
             if !cId.isEmpty, !deletedConvIDs.contains(cId) {
                 msgGroup[cId, default: []].append(msg)
             }
         }
 
         for convDTO in convs {
-            guard !deletedConvIDs.contains(convDTO.id) else { continue }
+            let convID = canonicalSyncID(convDTO.id)
+            outcome.conversationIDs.insert(convID)
+            guard !deletedConvIDs.contains(convID) else { continue }
             let convUUID = parseOrMakeUUID(convDTO.id)
             let rawKind = convDTO.kind ?? "text"
             let kind: AIConversationKind = (rawKind == "voice" || rawKind == "realtime") ? .realtime : .text
             let title = convDTO.title ?? "云端对话"
             let createdAt = Date(timeIntervalSince1970: Double(convDTO.createdAt ?? 0) / 1000.0)
 
-            let remoteMsgs = msgGroup[convDTO.id] ?? []
+            let remoteMsgs = msgGroup[convID] ?? []
             // 整段消息都被别端删掉的会话不值得重建
             if remoteMsgs.isEmpty, deletedMsgIDs.count > 0, msgs.contains(where: {
-                ($0.conversation_id ?? $0.conversationId) == convDTO.id
+                canonicalSyncID($0.conversation_id ?? $0.conversationId ?? "") == convID
             }) {
                 continue
             }
 
-            // 保存或创建本地会话
-            _ = try await database.ensureConversation(id: convUUID, kind: kind, defaultTitle: title, createdAt: createdAt)
-            outcome.conversations += 1
+            // 保存或创建本地会话。云端每次回放整张表，只有"真的建了新会话"
+            // 才算拉取到的增量，否则摘要里那串数字会一直不变。
+            let ensured = try await database.ensureConversation(
+                id: convUUID,
+                kind: kind,
+                defaultTitle: title,
+                createdAt: createdAt
+            )
+            if ensured.created {
+                outcome.conversations += 1
+            }
 
             // 合并消息
             for mDTO in remoteMsgs {
@@ -410,18 +472,23 @@ final class CloudSyncService: ObservableObject {
                 let content = mDTO.text ?? mDTO.content ?? ""
                 let msgDate = Date(timeIntervalSince1970: Double(mDTO.createdAt ?? 0) / 1000.0)
 
-                try await database.insertMessageIfNotExist(
+                let inserted = try await database.insertMessageIfNotExist(
                     id: msgUUID,
-                    conversationID: convUUID,
+                    conversationID: ensured.conversation.id,
                     role: role,
                     content: content,
                     createdAt: msgDate
                 )
-                outcome.messages += 1
+                if inserted {
+                    outcome.messages += 1
+                }
             }
         }
 
         let remoteReadings = response.sensorReadings ?? response.sensor_readings ?? []
+        for reading in remoteReadings {
+            outcome.readingKeys.insert("\(reading.deviceId):\(reading.sequence)")
+        }
         if !remoteReadings.isEmpty {
             let inserted = try await database.insertRemoteSensorReadings(remoteReadings)
             outcome.sensorReadings = inserted

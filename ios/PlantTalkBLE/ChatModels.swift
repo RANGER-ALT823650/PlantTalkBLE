@@ -56,6 +56,16 @@ struct SyncTombstone: Equatable, Sendable {
     let pendingPush: Bool
 }
 
+/// 同步 ID 的规范形式：去空白 + 转小写。
+///
+/// `UUID.uuidString` 恒为大写，而浏览器的 `crypto.randomUUID()` 恒为小写。
+/// Tablestore 主键按字节比较，SQLite 的 TEXT 默认也是大小写敏感的，于是同一条
+/// 记录在云端存成了两行，一端的墓碑永远匹配不上另一端那行——删除因此传不过去。
+/// 必须与 cloud/index.py 的 `canonical_id`、web 的 `canonicalId` 保持一致。
+func canonicalSyncID(_ value: String) -> String {
+    value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
 struct ChatMessage: Identifiable, Equatable, Sendable {
     let id: UUID
     let conversationID: UUID

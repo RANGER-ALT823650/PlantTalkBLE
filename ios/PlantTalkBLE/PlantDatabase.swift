@@ -163,6 +163,9 @@ actor PlantDatabase {
         try Self.makeMigrator().migrate(writer)
     }
 
+    /// 迁移器本体。测试用它配合 `migrate(_:upTo:)` 造出"升级前"的库现场。
+    static var migratorForTests: DatabaseMigrator { makeMigrator() }
+
     static func makeDefault() throws -> PlantDatabase {
         let fileManager = FileManager.default
         let directory = try fileManager.url(
@@ -535,27 +538,42 @@ actor PlantDatabase {
         return conversation
     }
 
+    /// `created` 为 true 表示这次真的建了新会话，供同步摘要统计真实增量。
+    @discardableResult
     func ensureConversation(
         id: UUID,
         kind: AIConversationKind = .text,
         defaultTitle: String = "云端对话",
         createdAt: Date = Date()
-    ) async throws -> AIConversation {
+    ) async throws -> (conversation: AIConversation, created: Bool) {
         try await writer.write { db in
+            // 大小写不同的旧行指向同一条会话，不能再建一条新的。
             let existingRow = try Row.fetchOne(
                 db,
-                sql: "SELECT id, title, kind, created_at, updated_at FROM ai_conversations WHERE id = ?",
-                arguments: [id.uuidString]
+                sql: """
+                    SELECT id, title, kind, created_at, updated_at
+                    FROM ai_conversations WHERE LOWER(id) = ?
+                    """,
+                arguments: [canonicalSyncID(id.uuidString)]
             )
             if let existingRow, let conv = Self.makeConversation(existingRow) {
                 if conv.kind == .text && kind == .realtime {
                     try db.execute(
                         sql: "UPDATE ai_conversations SET kind = ? WHERE id = ?",
-                        arguments: [kind.rawValue, id.uuidString]
+                        arguments: [kind.rawValue, conv.id.uuidString]
                     )
-                    return AIConversation(id: conv.id, title: conv.title, kind: .realtime, createdAt: conv.createdAt, updatedAt: conv.updatedAt)
+                    return (
+                        AIConversation(
+                            id: conv.id,
+                            title: conv.title,
+                            kind: .realtime,
+                            createdAt: conv.createdAt,
+                            updatedAt: conv.updatedAt
+                        ),
+                        false
+                    )
                 }
-                return conv
+                return (conv, false)
             }
             let conversation = AIConversation(
                 id: id,
@@ -577,22 +595,26 @@ actor PlantDatabase {
                     conversation.updatedAt
                 ]
             )
-            return conversation
+            return (conversation, true)
         }
     }
 
+    /// 返回值表示这条消息是否真的新插入了。同步摘要要靠它区分"云端回放的旧数据"
+    /// 和"这次真的新增了什么"——按响应条数报数会让同一批数字每次都出现。
+    @discardableResult
     func insertMessageIfNotExist(
         id: UUID,
         conversationID: UUID,
         role: ChatRole,
         content: String,
         createdAt: Date
-    ) async throws {
+    ) async throws -> Bool {
         try await writer.write { db in
+            // 大小写不同但指向同一条消息的旧行也算已存在，否则会插出重复消息。
             let count = try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM ai_messages WHERE id = ?",
-                arguments: [id.uuidString]
+                sql: "SELECT COUNT(*) FROM ai_messages WHERE LOWER(id) = ?",
+                arguments: [canonicalSyncID(id.uuidString)]
             ) ?? 0
             if count == 0 {
                 try db.execute(
@@ -619,7 +641,9 @@ actor PlantDatabase {
                     sql: "UPDATE ai_conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?",
                     arguments: [createdAt, conversationID.uuidString]
                 )
+                return true
             }
+            return false
         }
     }
 
@@ -1006,8 +1030,12 @@ actor PlantDatabase {
 
     // MARK: - Cloud sync tombstones
 
-    /// Upserts a tombstone. A row that still needs pushing is never downgraded to
-    /// "already synced", so a deletion cannot be silently dropped.
+    /// Upserts a tombstone. `pending_push` only clears when both the existing row
+    /// and this call consider it synced — a remote deletion means the cloud already
+    /// holds the tombstone, so that direction is a correct convergence.
+    ///
+    /// `entity_id` 一律以规范小写存储：本地行用的是 `UUID.uuidString` 的大写写法，
+    /// 但墓碑要跨端比较，只有统一成一种写法才对得上另一端的记录。
     private static func recordTombstone(
         _ db: Database,
         entityType: String,
@@ -1026,7 +1054,13 @@ actor PlantDatabase {
                     deleted_at = MIN(deleted_at, excluded.deleted_at),
                     pending_push = pending_push AND excluded.pending_push
                 """,
-            arguments: [entityType, entityID, conversationID, deletedAt, pendingPush]
+            arguments: [
+                entityType,
+                canonicalSyncID(entityID),
+                conversationID.map(canonicalSyncID),
+                deletedAt,
+                pendingPush
+            ]
         )
     }
 
@@ -1062,7 +1096,7 @@ actor PlantDatabase {
                         UPDATE sync_tombstones SET pending_push = 0
                         WHERE entity_type = ? AND entity_id = ?
                         """,
-                    arguments: [tombstone.type.rawValue, tombstone.entityID]
+                    arguments: [tombstone.type.rawValue, canonicalSyncID(tombstone.entityID)]
                 )
             }
         }
@@ -1079,23 +1113,26 @@ actor PlantDatabase {
             let now = Date()
 
             for deletion in deletions {
+                // 本地行的主键是 UUID.uuidString 的大写写法，而墓碑来自 Web 时是
+                // 小写。SQLite 的 = 对 TEXT 大小写敏感，必须显式折叠后再比。
+                let targetID = canonicalSyncID(deletion.entityID)
                 switch deletion.type {
                 case .conversation:
                     // ai_messages cascades on conversation delete.
                     try db.execute(
-                        sql: "DELETE FROM ai_conversations WHERE id = ?",
-                        arguments: [deletion.entityID]
+                        sql: "DELETE FROM ai_conversations WHERE LOWER(id) = ?",
+                        arguments: [targetID]
                     )
                     removedConversations += db.changesCount
                 case .message:
                     let owningConversationID = try String.fetchOne(
                         db,
-                        sql: "SELECT conversation_id FROM ai_messages WHERE id = ?",
-                        arguments: [deletion.entityID]
+                        sql: "SELECT conversation_id FROM ai_messages WHERE LOWER(id) = ?",
+                        arguments: [targetID]
                     )
                     try db.execute(
-                        sql: "DELETE FROM ai_messages WHERE id = ?",
-                        arguments: [deletion.entityID]
+                        sql: "DELETE FROM ai_messages WHERE LOWER(id) = ?",
+                        arguments: [targetID]
                     )
                     removedMessages += db.changesCount
 
@@ -1434,6 +1471,30 @@ actor PlantDatabase {
                 on: "sync_tombstones",
                 columns: ["pending_push"]
             )
+        }
+        migrator.registerMigration("canonicalize tombstone ids") { db in
+            // 已有墓碑用的是 UUID.uuidString 的大写写法，Web 那边是小写，两边永远
+            // 对不上。统一折叠成小写；同一条记录若已存在两种写法的墓碑，保留更早的
+            // 删除时间，且只要有一条还没推送就仍标记为待推送。
+            try db.execute(sql: """
+                INSERT INTO sync_tombstones (
+                    entity_type, entity_id, conversation_id, deleted_at, pending_push
+                )
+                SELECT
+                    entity_type,
+                    LOWER(entity_id),
+                    LOWER(MIN(conversation_id)),
+                    MIN(deleted_at),
+                    MAX(pending_push)
+                FROM sync_tombstones
+                WHERE entity_id <> LOWER(entity_id)
+                GROUP BY entity_type, LOWER(entity_id)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                    conversation_id = COALESCE(conversation_id, excluded.conversation_id),
+                    deleted_at = MIN(deleted_at, excluded.deleted_at),
+                    pending_push = pending_push OR excluded.pending_push
+                """)
+            try db.execute(sql: "DELETE FROM sync_tombstones WHERE entity_id <> LOWER(entity_id)")
         }
         return migrator
     }

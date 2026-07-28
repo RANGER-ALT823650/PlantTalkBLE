@@ -404,10 +404,187 @@ final class PlantDatabaseTests: XCTestCase {
         XCTAssertEqual(messages.last?.imageAttachments, [newImage])
     }
 
+    // MARK: - 跨端删除：ID 大小写
+
+    /// Web 生成的 ID 是小写，`UUID.uuidString` 是大写，SQLite 的 = 对 TEXT 大小写
+    /// 敏感。删除意图因此匹配不到本地行——记录看着"删不掉"。
+    func testLowercaseRemoteTombstoneDeletesLocalConversation() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let conversation = try await database.createConversation(title: "网页建的对话", kind: .text)
+        try await database.saveChatMessage(ChatMessage(
+            id: UUID(),
+            conversationID: conversation.id,
+            role: .user,
+            content: "你好",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        ))
+
+        let removed = try await database.applyRemoteDeletions([
+            SyncTombstone(
+                type: .conversation,
+                entityID: conversation.id.uuidString.lowercased(),
+                conversationID: nil,
+                deletedAt: Date(),
+                pendingPush: false
+            )
+        ])
+
+        XCTAssertEqual(removed.conversations, 1, "小写墓碑没能删掉本地大写主键的那一行")
+        let survivors = try await database.allConversations()
+        XCTAssertTrue(survivors.isEmpty)
+    }
+
+    func testLowercaseRemoteTombstoneDeletesSingleMessage() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let conversation = try await database.createConversation(title: "对话", kind: .text)
+        let doomed = UUID()
+        for (index, id) in [doomed, UUID()].enumerated() {
+            try await database.saveChatMessage(ChatMessage(
+                id: id,
+                conversationID: conversation.id,
+                role: .user,
+                content: "第 \(index) 条",
+                createdAt: Date(timeIntervalSince1970: 1_750_000_000 + Double(index))
+            ))
+        }
+
+        let removed = try await database.applyRemoteDeletions([
+            SyncTombstone(
+                type: .message,
+                entityID: doomed.uuidString.lowercased(),
+                conversationID: nil,
+                deletedAt: Date(),
+                pendingPush: false
+            )
+        ])
+
+        XCTAssertEqual(removed.messages, 1)
+        let remaining = try await database.chatMessages(conversationID: conversation.id)
+        XCTAssertEqual(remaining.count, 1, "删一条消息不应带走整个会话")
+    }
+
+    /// 本地删除要以规范小写记入墓碑，否则推到云端也匹配不上对方那一行。
+    func testLocalDeletionRecordsCanonicalLowercaseTombstone() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let conversation = try await database.createConversation(title: "对话", kind: .text)
+        try await database.deleteConversation(id: conversation.id)
+
+        let tombstones = try await database.pendingTombstones()
+        XCTAssertEqual(tombstones.count, 1)
+        XCTAssertEqual(tombstones.first?.entityID, conversation.id.uuidString.lowercased())
+    }
+
+    /// 云端回传大写 ID 时不能建出第二条会话，也不能重复插消息。
+    func testEnsureConversationMatchesExistingRowIgnoringCase() async throws {
+        let database = try PlantDatabase(path: temporaryDatabasePath())
+        let conversation = try await database.createConversation(title: "本地对话", kind: .text)
+        let messageID = UUID()
+        try await database.saveChatMessage(ChatMessage(
+            id: messageID,
+            conversationID: conversation.id,
+            role: .user,
+            content: "你好",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        ))
+
+        // 用小写 ID 走一遍拉取路径：UUID 本身大小写无关，验证的是"不算新增"。
+        let ensured = try await database.ensureConversation(id: conversation.id, kind: .text)
+        XCTAssertFalse(ensured.created, "已存在的会话不能报成新增")
+
+        let inserted = try await database.insertMessageIfNotExist(
+            id: messageID,
+            conversationID: conversation.id,
+            role: .user,
+            content: "你好",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        XCTAssertFalse(inserted, "已存在的消息不能报成新增，否则摘要每次都显示同一批数字")
+        let conversations = try await database.allConversations()
+        XCTAssertEqual(conversations.count, 1)
+    }
+
+    /// 老库里的大写墓碑要在迁移时折叠成小写，且未推送状态不能丢。
+    func testMigrationCanonicalizesLegacyUppercaseTombstones() async throws {
+        let uppercase = UUID().uuidString
+        let path = try legacyDatabasePathWithUppercaseTombstone(uppercase)
+
+        let migrated = try PlantDatabase(path: path)
+        let tombstones = try await migrated.allTombstones()
+
+        XCTAssertEqual(tombstones.map(\.entityID), [uppercase.lowercased()])
+        XCTAssertTrue(tombstones.first?.pendingPush ?? false, "还没推送成功的删除不能被标记为已同步")
+    }
+
+    /// 同一条记录留下大小写两条墓碑时，合并后仍需推送，删除时间取更早的那次。
+    func testMigrationMergesTombstonePairKeepingPendingPush() async throws {
+        let uppercase = UUID().uuidString
+        let path = try legacyDatabasePathWithUppercaseTombstone(
+            uppercase,
+            alsoLowercase: (deletedAt: 1_750_000_000, pendingPush: false),
+            uppercaseDeletedAt: 1_750_000_500,
+            uppercasePendingPush: true
+        )
+
+        let migrated = try PlantDatabase(path: path)
+        let tombstones = try await migrated.allTombstones()
+
+        XCTAssertEqual(tombstones.count, 1, "两种写法指向同一条记录，只该留一条墓碑")
+        XCTAssertTrue(tombstones.first?.pendingPush ?? false)
+        XCTAssertEqual(
+            tombstones.first?.deletedAt,
+            Date(timeIntervalSince1970: 1_750_000_000),
+            "删除时间应取更早的那次"
+        )
+    }
+
     private func temporaryDatabasePath() -> String {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".sqlite")
             .path
+    }
+
+    /// 造一个跑到"track sync deletions"为止的库，里面存着大写写法的墓碑，
+    /// 用来验证后续的规范化迁移。
+    private func legacyDatabasePathWithUppercaseTombstone(
+        _ uppercaseID: String,
+        alsoLowercase lowercase: (deletedAt: Double, pendingPush: Bool)? = nil,
+        uppercaseDeletedAt: Double = 1_750_000_000,
+        uppercasePendingPush: Bool = true
+    ) throws -> String {
+        let path = temporaryDatabasePath()
+        let queue = try DatabaseQueue(path: path)
+        // 先用真实迁移器把库建到"墓碑表刚建好"的状态：规范化迁移还没跑，
+        // 正式打开这个库时才会执行，正是要验证的场景。
+        try PlantDatabase.migratorForTests.migrate(queue, upTo: "track sync deletions")
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO sync_tombstones (
+                        entity_type, entity_id, conversation_id, deleted_at, pending_push
+                    ) VALUES ('conversation', ?, NULL, ?, ?)
+                    """,
+                arguments: [
+                    uppercaseID,
+                    Date(timeIntervalSince1970: uppercaseDeletedAt),
+                    uppercasePendingPush
+                ]
+            )
+            if let lowercase {
+                try db.execute(
+                    sql: """
+                        INSERT INTO sync_tombstones (
+                            entity_type, entity_id, conversation_id, deleted_at, pending_push
+                        ) VALUES ('conversation', ?, NULL, ?, ?)
+                        """,
+                    arguments: [
+                        uppercaseID.lowercased(),
+                        Date(timeIntervalSince1970: lowercase.deletedAt),
+                        lowercase.pendingPush
+                    ]
+                )
+            }
+        }
+        return path
     }
 
     private func legacyDatabasePathWithDeletedHighWaterMessage() throws -> String {
