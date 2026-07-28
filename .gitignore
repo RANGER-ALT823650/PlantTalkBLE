@@ -10,5 +10,8 @@ web/
 **/xcuserdata/
 *.xcuserstate
 
+# 固件里的 Wi-Fi 凭据与云端 token（模板见 CloudConfig.example.h）
+firmware/PlantSensorBLE/CloudConfig.h
+
 
 

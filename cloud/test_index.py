@@ -78,6 +78,7 @@ class FakeOTSClient:
         self.schema = tables
         self.rows = {name: {} for name in tables}
         self.range_calls = 0
+        self.row_gets = 0
 
     # -- helpers
     def _pk_tuple(self, primary_key):
@@ -104,6 +105,18 @@ class FakeOTSClient:
     def put_row(self, table_name, row, condition):
         self._require_table(table_name)
         self.rows[table_name][self._pk_tuple(row.primary_key)] = list(row.attribute_columns or [])
+
+    def get_row(self, table_name, primary_key, columns_to_get=None):
+        """真实 SDK 返回 (consumed, row, next_token)，行不存在时 row 为 None。"""
+        self._require_table(table_name)
+        self.row_gets += 1
+        pk = self._pk_tuple(primary_key)
+        attrs = self.rows[table_name].get(pk)
+        if attrs is None:
+            return None, None, None
+        pk_names = self.schema[table_name]
+        stored_pk = [(pk_names[i], value) for i, value in enumerate(pk)]
+        return None, Row(stored_pk, list(attrs)), None
 
     def delete_row(self, table_name, row, condition):
         self._require_table(table_name)
@@ -185,10 +198,17 @@ FULL_TABLES = {
     'messages': ['conversation_id', 'message_id'],
     'deletions': ['entity_type', 'entity_id'],
     'sensor_readings': ['device_id', 'sequence'],
+    'commands': ['command_id'],
+    'device_pending': ['device_id'],
 }
 LEGACY_TABLES = {
     'conversations': ['conversation_id'],
     'messages': ['conversation_id', 'message_id'],
+}
+# 老部署：建了指令表但没建待办索引表，轮询要降级成扫表。
+COMMAND_TABLES_WITHOUT_INDEX = {
+    'sensor_readings': ['device_id', 'sequence'],
+    'commands': ['command_id'],
 }
 
 
@@ -205,9 +225,19 @@ def make_reading(device_id='d1', sequence=1, recorded=1000):
     }
 
 
-def call(client, method, path, body=None, query=None):
+TEST_TOKEN = 'test-token'
+
+
+def call(client, method, path, body=None, query=None, headers=None):
+    """
+    发一次请求。默认带上正确的 x-auth-token —— AUTH_TOKEN 现在是强制的，
+    不带 token 的调用一律被拒，那是鉴权测试自己的事。
+    """
     index.get_ots_client = lambda: client
-    status, _, data = index.main_logic(method, path, {}, query or {}, body or {})
+    merged_headers = {'x-auth-token': TEST_TOKEN}
+    if headers is not None:
+        merged_headers = dict(headers)
+    status, _, data = index.main_logic(method, path, merged_headers, query or {}, body or {})
     return status, data
 
 
@@ -228,7 +258,7 @@ UPPER_MSG = LOWER_MSG.upper()
 
 class DeletionSyncTests(unittest.TestCase):
     def setUp(self):
-        os.environ.pop('AUTH_TOKEN', None)
+        os.environ['AUTH_TOKEN'] = TEST_TOKEN
         self.client = FakeOTSClient(FULL_TABLES)
 
     def push(self, **body):
@@ -395,16 +425,29 @@ class DeletionSyncTests(unittest.TestCase):
 
     def test_auth_token_is_enforced(self):
         os.environ['AUTH_TOKEN'] = 'secret'
-        try:
-            index.get_ots_client = lambda: self.client
-            status, _, data = index.main_logic('GET', '/sync/pull', {}, {'since': '0'}, {})
-            self.assertEqual(status, 401)
-            status, _, data = index.main_logic(
-                'GET', '/sync/pull', {'x-auth-token': 'secret'}, {'since': '0'}, {}
-            )
-            self.assertEqual(status, 200, data)
-        finally:
-            os.environ.pop('AUTH_TOKEN', None)
+        index.get_ots_client = lambda: self.client
+        status, _, data = index.main_logic('GET', '/sync/pull', {}, {'since': '0'}, {})
+        self.assertEqual(status, 401)
+        status, _, data = index.main_logic(
+            'GET', '/sync/pull', {'x-auth-token': 'secret'}, {'since': '0'}, {}
+        )
+        self.assertEqual(status, 200, data)
+
+    def test_missing_auth_token_config_stops_serving(self):
+        """
+        未配置 AUTH_TOKEN 时必须拒绝服务而不是放行。
+        /command/create 能驱动用户家里的硬件采样，开放接口等于交出设备控制权。
+        """
+        os.environ.pop('AUTH_TOKEN', None)
+        index.get_ots_client = lambda: self.client
+        for method, path, query in (
+            ('GET', '/sync/pull', {'since': '0'}),
+            ('POST', '/command/create', {}),
+            ('GET', '/command/poll', {'deviceId': 'd1'}),
+        ):
+            status, _, data = index.main_logic(method, path, {}, query, {})
+            self.assertEqual(status, 503, f'{method} {path} 应停止服务，实际 {status}')
+            self.assertIn('AUTH_TOKEN', data['error'])
 
     def test_malformed_payload_does_not_crash(self):
         result = self.push(
@@ -497,13 +540,240 @@ class DeletionSyncTests(unittest.TestCase):
             {
                 'httpMethod': 'POST',
                 'rawPath': '/sync/push',
-                'headers': {},
+                'headers': {'x-auth-token': TEST_TOKEN},
                 'body': json.dumps({'conversations': [make_conv('c1')], 'messages': []}),
             },
             None,
         )
         self.assertEqual(response['statusCode'], 200)
         self.assertTrue(json.loads(response['body'])['success'])
+
+
+class CommandMailboxTests(unittest.TestCase):
+    """
+    远程采样指令信箱（方案 A）。链路是
+    App /command/create -> ESP32 /command/poll -> ESP32 /command/respond -> App /command/status。
+    """
+
+    def setUp(self):
+        os.environ['AUTH_TOKEN'] = TEST_TOKEN
+        self.client = FakeOTSClient(FULL_TABLES)
+        self.clock = 1_000_000
+        index.now_ms = lambda: self.clock
+
+    def tearDown(self):
+        # now_ms 是模块级函数，冻结完必须还原，否则污染同进程内的其它测试。
+        index.now_ms = lambda: int(time.time() * 1000)
+
+    def create(self, device_id='d1', action='refresh_sensor', client=None):
+        status, data = call(
+            client or self.client,
+            'POST', '/command/create',
+            {'deviceId': device_id, 'action': action},
+        )
+        self.assertEqual(status, 200, data)
+        return data
+
+    def poll(self, device_id='d1', client=None):
+        status, data = call(
+            client or self.client,
+            'GET', '/command/poll', query={'deviceId': device_id},
+        )
+        self.assertEqual(status, 200, data)
+        return data
+
+    def respond(self, command_id, reading, client=None):
+        status, data = call(
+            client or self.client,
+            'POST', '/command/respond',
+            {'commandId': command_id, 'reading': reading},
+        )
+        self.assertEqual(status, 200, data)
+        return data
+
+    def status_of(self, command_id, client=None):
+        status, data = call(
+            client or self.client,
+            'GET', '/command/status', query={'commandId': command_id},
+        )
+        self.assertEqual(status, 200, data)
+        return data
+
+    def test_full_roundtrip(self):
+        created = self.create()
+        self.assertEqual(created['status'], 'pending')
+
+        polled = self.poll()
+        self.assertTrue(polled['hasCommand'])
+        self.assertEqual(polled['commandId'], created['commandId'])
+        self.assertEqual(polled['action'], 'refresh_sensor')
+
+        reading = make_reading(device_id='d1', sequence=42, recorded=1_000_500)
+        responded = self.respond(created['commandId'], reading)
+        self.assertTrue(responded['storedReading'])
+
+        final = self.status_of(created['commandId'])
+        self.assertEqual(final['status'], 'completed')
+        self.assertEqual(final['reading']['sequence'], 42)
+
+        # 回填的读数必须真的进了 sensor_readings，能被普通同步拉到
+        status, pulled = call(self.client, 'GET', '/sync/pull', query={'since': '0'})
+        self.assertEqual(status, 200, pulled)
+        self.assertEqual([r['sequence'] for r in pulled['sensorReadings']], [42])
+
+    def test_completed_command_is_not_polled_again(self):
+        """指令取走并回填后必须从待办里消失，否则设备会反复采样同一条指令。"""
+        created = self.create()
+        self.poll()
+        self.respond(created['commandId'], make_reading(sequence=7))
+        self.assertFalse(self.poll()['hasCommand'])
+
+    def test_poll_does_not_scan_commands_table(self):
+        """
+        ESP32 每几秒轮询一次。原实现从 INF_MIN 扫到 INF_MAX 找 pending，
+        指令表只增不删，跑几个月后每次轮询都要扫全表。这里锁定"不扫表"。
+        """
+        # 先在 commands 表里堆一批已完成的历史指令，再发一条真正待办的
+        for seq in range(5):
+            self.respond(self.create()['commandId'], make_reading(sequence=90 + seq))
+        pending = self.create()
+
+        self.client.range_calls = 0
+        polled = self.poll()
+        self.assertTrue(polled['hasCommand'])
+        self.assertEqual(polled['commandId'], pending['commandId'])
+        self.assertEqual(self.client.range_calls, 0, '轮询不应触发任何 GetRange')
+
+    def test_idle_poll_does_not_scan_either(self):
+        """
+        绝大多数轮询是空转（没有待办）。"索引行不存在"必须与"索引表不存在"
+        区别对待，否则空闲轮询每次都降级扫表，开销回到原点。
+        """
+        self.respond(self.create()['commandId'], make_reading(sequence=1))
+        self.client.range_calls = 0
+        for _ in range(10):
+            self.assertFalse(self.poll()['hasCommand'])
+        self.assertEqual(self.client.range_calls, 0, '空闲轮询同样不应扫表')
+
+    def test_expired_pending_is_not_delivered(self):
+        """
+        设备离线期间堆积的 pending 不能在它上线时被执行：
+        用户会看到一条几天前请求的"即时"读数。
+        """
+        created = self.create()
+        self.clock += index.COMMAND_TTL_MS + 1
+        self.assertFalse(self.poll()['hasCommand'])
+
+        expired = self.status_of(created['commandId'])
+        self.assertEqual(expired['status'], 'expired')
+        self.assertIn('联网', expired['error'])
+
+    def test_command_within_ttl_is_still_delivered(self):
+        created = self.create()
+        self.clock += index.COMMAND_TTL_MS - 1
+        self.assertEqual(self.poll()['commandId'], created['commandId'])
+
+    def test_newer_command_replaces_expired_one(self):
+        """过期指令清掉之后，新指令必须还能被轮询到。"""
+        self.create()
+        self.clock += index.COMMAND_TTL_MS + 1
+        self.assertFalse(self.poll()['hasCommand'])
+
+        fresh = self.create()
+        self.assertEqual(self.poll()['commandId'], fresh['commandId'])
+
+    def test_respond_does_not_clobber_a_newer_pending_command(self):
+        """
+        回填旧指令时无条件删索引，会把用户刚发的新指令一起抹掉，
+        设备再也轮询不到它。
+        """
+        first = self.create()
+        second = self.create()
+        self.respond(first['commandId'], make_reading(sequence=1))
+
+        polled = self.poll()
+        self.assertTrue(polled['hasCommand'], '新指令不应被旧指令的回填清掉')
+        self.assertEqual(polled['commandId'], second['commandId'])
+
+    def test_poll_isolates_devices(self):
+        self.create(device_id='d1')
+        self.assertFalse(self.poll(device_id='d2')['hasCommand'])
+
+    def test_reading_without_sequence_keeps_command_pending(self):
+        """
+        读数写不进去就不能把指令标成 completed：
+        否则 App 看到 completed 却拿不到数据，无从判断问题在哪。
+        """
+        created = self.create()
+        bad = make_reading(sequence=1)
+        del bad['sequence']
+        status, data = call(
+            self.client, 'POST', '/command/respond',
+            {'commandId': created['commandId'], 'reading': bad},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(data['success'])
+        self.assertEqual(self.status_of(created['commandId'])['status'], 'pending')
+        self.assertTrue(self.poll()['hasCommand'], '回填失败的指令应仍可被重试')
+
+    def test_respond_to_unknown_command_is_rejected(self):
+        status, data = call(
+            self.client, 'POST', '/command/respond',
+            {'commandId': 'cmd_does_not_exist', 'reading': make_reading(sequence=1)},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(data['success'])
+        self.assertEqual(data['status'], 'not_found')
+
+    def test_status_of_unknown_command(self):
+        data = self.status_of('cmd_nope')
+        self.assertFalse(data['success'])
+        self.assertEqual(data['status'], 'not_found')
+
+    def test_command_ids_do_not_collide_within_same_millisecond(self):
+        """
+        原实现的 ID 后缀是前缀毫秒数的后三位而非随机数，
+        同一毫秒的两次请求会生成相同 ID，后者直接覆盖前者。
+        """
+        ids = {self.create()['commandId'] for _ in range(50)}
+        self.assertEqual(len(ids), 50, '同一毫秒内创建的指令 ID 必须互不相同')
+
+    def test_poll_falls_back_to_scan_without_index_table(self):
+        """老部署没建 device_pending 表时，轮询降级为扫表而不是失败。"""
+        legacy = FakeOTSClient(COMMAND_TABLES_WITHOUT_INDEX)
+        created = self.create(client=legacy)
+        self.assertIn('device_pending', created['pending_index_hint'])
+
+        polled = self.poll(client=legacy)
+        self.assertTrue(polled['hasCommand'])
+        self.assertEqual(polled['commandId'], created['commandId'])
+
+        self.respond(created['commandId'], make_reading(sequence=3), client=legacy)
+        self.assertFalse(self.poll(client=legacy)['hasCommand'])
+
+    def test_poll_without_command_table_reports_no_work(self):
+        """两张表都没建时轮询也不能 500 —— 固件会把非 200 当成网络故障重试。"""
+        bare = FakeOTSClient(LEGACY_TABLES)
+        self.assertFalse(self.poll(client=bare)['hasCommand'])
+
+    def test_create_without_command_table_explains_how_to_fix(self):
+        bare = FakeOTSClient(LEGACY_TABLES)
+        status, data = call(bare, 'POST', '/command/create', {'deviceId': 'd1'})
+        self.assertEqual(status, 200)
+        self.assertFalse(data['success'])
+        self.assertIn('commands', data['error'])
+
+    def test_respond_without_sensor_table_keeps_command_pending(self):
+        no_sensor = FakeOTSClient({'commands': ['command_id'], 'device_pending': ['device_id']})
+        created = self.create(client=no_sensor)
+        status, data = call(
+            no_sensor, 'POST', '/command/respond',
+            {'commandId': created['commandId'], 'reading': make_reading(sequence=4)},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(data['success'])
+        self.assertIn('sensor_readings', data['error'])
+        self.assertEqual(self.status_of(created['commandId'], client=no_sensor)['status'], 'pending')
 
 
 if __name__ == '__main__':

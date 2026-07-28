@@ -13,7 +13,22 @@
 #include <sys/time.h>
 #include <time.h>
 
+// Wi-Fi remote sampling (cloud command mailbox) is opt-in: it only compiles when
+// CloudConfig.h exists. Without it the firmware behaves exactly as it did before
+// Wi-Fi was introduced — BLE only, no radio sharing, no network stack.
+#if __has_include("CloudConfig.h")
+#include "CloudConfig.h"
+#define PLANT_CLOUD_ENABLED 1
+#include <HTTPClient.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <freertos/task.h>
+#else
+#define PLANT_CLOUD_ENABLED 0
+#endif
+
 // ---------- Hardware ----------
+constexpr uint8_t STATUS_LED_PIN = 2;
 constexpr uint8_t I2C_SDA_PIN = 21;
 constexpr uint8_t I2C_SCL_PIN = 22;
 constexpr uint8_t SOIL_ADC_PIN = 34;
@@ -56,6 +71,27 @@ constexpr char DATA_CHARACTERISTIC_UUID[] = "7A1E0002-7C6D-4A8B-9E1F-2D3C4B5A600
 constexpr char CONTROL_CHARACTERISTIC_UUID[] = "7A1E0003-7C6D-4A8B-9E1F-2D3C4B5A6000";
 constexpr char HISTORY_CHARACTERISTIC_UUID[] = "7A1E0004-7C6D-4A8B-9E1F-2D3C4B5A6000";
 
+#if PLANT_CLOUD_ENABLED
+// ---------- Cloud command mailbox ----------
+// Poll cadence. The cloud expires an unclaimed command after 60 s, so this must
+// stay well below that or a request can expire before the device ever sees it.
+constexpr unsigned long CLOUD_POLL_INTERVAL_MS = 3000;
+// Backoff applied after a failed poll, so a flaky link or a cold cloud function
+// does not turn into a tight request loop.
+constexpr unsigned long CLOUD_POLL_BACKOFF_MS = 15000;
+constexpr unsigned long CLOUD_WIFI_RETRY_MS = 30000;
+constexpr unsigned long CLOUD_HTTP_TIMEOUT_MS = 8000;
+// How long the Wi-Fi task waits for the main loop to take the sample it asked
+// for. Sampling itself is fast; the budget covers a loop busy shipping a
+// history batch over BLE.
+constexpr unsigned long CLOUD_SAMPLE_WAIT_MS = 6000;
+constexpr uint32_t CLOUD_TASK_STACK_BYTES = 8192;
+// Pin the network task to core 0 and leave the Arduino loop (core 1) alone, so
+// BLE history transfer keeps its timing.
+constexpr BaseType_t CLOUD_TASK_CORE = 0;
+constexpr UBaseType_t CLOUD_TASK_PRIORITY = 1;
+#endif
+
 // ---------- LittleFS ring storage ----------
 constexpr char HISTORY_FILE_PATH[] = "/history.bin";
 constexpr size_t HISTORY_FS_RESERVE_BYTES = 64UL * 1024UL;
@@ -97,6 +133,33 @@ enum class QueuedCommandType : uint8_t {
   RequestImmediateSample,
   SendFailure
 };
+
+#if PLANT_CLOUD_ENABLED
+// The reading the main loop most recently committed to history. The Wi-Fi task
+// reads it to build its upload body.
+//
+// Sampling is NOT done on the Wi-Fi task: sampleStoreAndPublish() touches
+// LittleFS, the I2C bus and the BLE characteristics, none of which are
+// thread-safe. The task instead enqueues RequestImmediateSample on the existing
+// control queue and waits for the main loop to run it — the same path the BLE
+// 0x13 command already uses.
+struct CloudSampleResult {
+  uint32_t token;       // matches the request token, so a stale sample is not reused
+  uint32_t sequence;
+  uint32_t recordedAt;
+  uint16_t soilRaw;
+  float temperature;
+  float humidity;
+  float lightLux;
+  uint8_t flags;
+  bool stored;
+};
+
+SemaphoreHandle_t cloudSampleMutex = nullptr;
+TaskHandle_t cloudTaskHandle = nullptr;
+volatile uint32_t cloudSampleRequestToken = 0;
+CloudSampleResult cloudLastSample = {};
+#endif
 
 struct QueuedCommand {
   QueuedCommandType type;
@@ -365,6 +428,10 @@ int16_t encodeTemperature(float value) {
   return static_cast<int16_t>(constrain(scaled, -32768.0f, 32767.0f));
 }
 
+#if PLANT_CLOUD_ENABLED
+void publishCloudSample(const SensorSample &sample, uint32_t sequence, uint32_t recordedAt);
+#endif
+
 uint16_t encodeUnsignedHundredths(float value, float maximum) {
   if (isnan(value)) {
     return 0;
@@ -419,6 +486,14 @@ bool appendHistoryRecord(const SensorSample &sample) {
     ? newestSequence - historyCount + 1
     : 1;
   ++nextSequence;
+
+#if PLANT_CLOUD_ENABLED
+  // Hand the committed record to the Wi-Fi task. Publishing the sequence that
+  // was actually written (rather than re-deriving one on the network side) keeps
+  // the cloud row's primary key identical to the one BLE sync will later push,
+  // so remote sampling cannot create a duplicate of the same reading.
+  publishCloudSample(sample, newestSequence, newestTimestamp);
+#endif
 
   Serial.printf(
     "History stored: sequence=%lu, slot=%lu, count=%lu.\n",
@@ -866,9 +941,370 @@ void processControlCommands() {
   }
 }
 
+#if PLANT_CLOUD_ENABLED
+// ---------- Cloud command mailbox (Wi-Fi side channel) ----------
+//
+// Everything below runs on a dedicated core-0 task and is strictly additive: it
+// never touches BLE state, LittleFS or the sample scheduler directly. The only
+// coupling points are the existing control queue (to ask for a sample) and
+// cloudLastSample (to read the result back).
+
+void publishCloudSample(const SensorSample &sample, uint32_t sequence, uint32_t recordedAt) {
+  if (cloudSampleMutex == nullptr) {
+    return;
+  }
+  if (xSemaphoreTake(cloudSampleMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return;
+  }
+  cloudLastSample.token = cloudSampleRequestToken;
+  cloudLastSample.sequence = sequence;
+  cloudLastSample.recordedAt = recordedAt;
+  cloudLastSample.soilRaw = sample.soilRaw;
+  cloudLastSample.temperature = sample.temperature;
+  cloudLastSample.humidity = sample.humidity;
+  cloudLastSample.lightLux = sample.lightLux;
+  cloudLastSample.flags = sample.flags | (clockEstimated ? FLAG_TIME_ESTIMATED : 0);
+  cloudLastSample.stored = true;
+  xSemaphoreGive(cloudSampleMutex);
+}
+
+// Asks the main loop for a fresh sample and waits for it. Returns false if the
+// loop did not deliver one in time, so the command stays pending in the cloud
+// and the next poll can retry it.
+bool requestSampleFromMainLoop(CloudSampleResult *out) {
+  if (controlCommandQueue == nullptr || cloudSampleMutex == nullptr) {
+    return false;
+  }
+
+  const uint32_t token = cloudSampleRequestToken + 1;
+  cloudSampleRequestToken = token;
+
+  const QueuedCommand request = {QueuedCommandType::RequestImmediateSample, 0, 0};
+  if (xQueueSend(controlCommandQueue, &request, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.println("CLOUD: control queue full; sample request dropped.");
+    return false;
+  }
+
+  const unsigned long deadline = millis() + CLOUD_SAMPLE_WAIT_MS;
+  while (static_cast<long>(millis() - deadline) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if (xSemaphoreTake(cloudSampleMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+      continue;
+    }
+    const bool ready = cloudLastSample.stored && cloudLastSample.token == token;
+    if (ready) {
+      *out = cloudLastSample;
+    }
+    xSemaphoreGive(cloudSampleMutex);
+    if (ready) {
+      return true;
+    }
+  }
+
+  Serial.println("CLOUD: timed out waiting for the main loop to sample.");
+  return false;
+}
+
+bool ensureWiFiConnected() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  Serial.printf("CLOUD: connecting to Wi-Fi SSID %s ...\n", PLANT_WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  // Wi-Fi and BLE share one 2.4 GHz radio on this chip. Modem sleep lets the
+  // coexistence arbiter hand the radio back to BLE between polls; without it
+  // BLE history transfer slows down noticeably.
+  WiFi.setSleep(true);
+  WiFi.begin(PLANT_WIFI_SSID, PLANT_WIFI_PASSWORD);
+
+  const unsigned long deadline = millis() + 15000;
+  while (WiFi.status() != WL_CONNECTED && static_cast<long>(millis() - deadline) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("CLOUD: Wi-Fi connect failed; staying in BLE-only mode this round.");
+    // Drop the radio rather than leaving it retrying in the background, so BLE
+    // gets the full airtime until the next attempt.
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  Serial.print("CLOUD: Wi-Fi connected, IP ");
+  Serial.println(WiFi.localIP());
+  return true;
+}
+
+// Shared by all three calls. Returns the HTTP status, or a negative value on
+// transport failure; the body is appended to `response`.
+int cloudRequest(const char *method, const String &url, const String &body, String *response) {
+  WiFiClientSecure client;
+  // The device has no CA bundle and no reliable wall clock before the first time
+  // sync, so certificate validation cannot be performed here. The link is still
+  // encrypted; the auth token is what proves the caller's identity to the cloud.
+  client.setInsecure();
+  client.setTimeout(CLOUD_HTTP_TIMEOUT_MS / 1000);
+
+  HTTPClient http;
+  if (!http.begin(client, url)) {
+    return -1;
+  }
+  http.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+  http.setConnectTimeout(CLOUD_HTTP_TIMEOUT_MS);
+  http.addHeader("x-auth-token", PLANT_CLOUD_AUTH_TOKEN);
+
+  int status = -1;
+  if (strcmp(method, "POST") == 0) {
+    http.addHeader("Content-Type", "application/json");
+    status = http.POST(body);
+  } else {
+    status = http.GET();
+  }
+
+  if (status > 0 && response != nullptr) {
+    *response = http.getString();
+  }
+  http.end();
+  return status;
+}
+
+// Minimal string extraction for the two fields the device needs. A JSON parser
+// would be more robust, but pulling one in for two known keys is not worth the
+// flash; the cloud responses are generated by our own function.
+bool extractJSONString(const String &source, const char *key, String *value) {
+  String needle = String("\"") + key + "\"";
+  int keyAt = source.indexOf(needle);
+  if (keyAt < 0) {
+    return false;
+  }
+  int cursor = source.indexOf(':', keyAt + needle.length());
+  if (cursor < 0) {
+    return false;
+  }
+  ++cursor;
+  while (cursor < static_cast<int>(source.length()) && isspace(source[cursor])) {
+    ++cursor;
+  }
+  // The value must be a string starting right here. Scanning ahead for the next
+  // quote would, for a null value, return some later key's string instead.
+  if (cursor >= static_cast<int>(source.length()) || source[cursor] != '"') {
+    return false;
+  }
+  int lastQuote = source.indexOf('"', cursor + 1);
+  if (lastQuote < 0) {
+    return false;
+  }
+  *value = source.substring(cursor + 1, lastQuote);
+  return true;
+}
+
+bool jsonBoolIsTrue(const String &source, const char *key) {
+  String needle = String("\"") + key + "\"";
+  int keyAt = source.indexOf(needle);
+  if (keyAt < 0) {
+    return false;
+  }
+  int cursor = source.indexOf(':', keyAt + needle.length());
+  if (cursor < 0) {
+    return false;
+  }
+  ++cursor;
+  while (cursor < static_cast<int>(source.length()) && isspace(source[cursor])) {
+    ++cursor;
+  }
+  // Match the value position exactly. Searching for "true" anywhere after the
+  // colon would find a later key's value and report this one as true.
+  return source.startsWith("true", cursor);
+}
+
+String cloudEndpoint(const char *suffix) {
+  return String(PLANT_CLOUD_BASE_URL) + suffix;
+}
+
+// Appends `name: value` to a JSON body, rendering unavailable sensors as null
+// rather than 0 — the cloud omits null metrics instead of storing a fake zero.
+void appendJSONFloat(String *body, const char *name, float value, bool valid) {
+  *body += "\"";
+  *body += name;
+  *body += "\":";
+  if (valid && !isnan(value)) {
+    *body += String(value, 2);
+  } else {
+    *body += "null";
+  }
+}
+
+bool uploadCloudSample(const String &commandID, const CloudSampleResult &sample) {
+  String body = "{\"commandId\":\"";
+  body += commandID;
+  body += "\",\"reading\":{\"deviceId\":\"";
+  body += PLANT_CLOUD_DEVICE_ID;
+  body += "\",\"sequence\":";
+  body += String(sample.sequence);
+  body += ",\"recordedAt\":";
+  // The cloud stores milliseconds; the firmware clock is in seconds.
+  body += String(static_cast<uint64_t>(sample.recordedAt) * 1000ULL);
+  body += ",\"timestampEstimated\":";
+  body += (sample.flags & FLAG_TIME_ESTIMATED) ? "true" : "false";
+  body += ",\"soilRaw\":";
+  body += String(sample.soilRaw);
+  body += ",";
+  appendJSONFloat(&body, "temperature", sample.temperature, sample.flags & FLAG_SHT31_VALID);
+  body += ",";
+  appendJSONFloat(&body, "humidity", sample.humidity, sample.flags & FLAG_SHT31_VALID);
+  body += ",";
+  appendJSONFloat(&body, "lightLux", sample.lightLux, sample.flags & FLAG_BH1750_VALID);
+  body += "}}";
+
+  String response;
+  const int status = cloudRequest("POST", cloudEndpoint("/command/respond"), body, &response);
+  if (status != 200) {
+    Serial.printf("CLOUD: respond failed, HTTP %d.\n", status);
+    return false;
+  }
+  if (!jsonBoolIsTrue(response, "success")) {
+    // The cloud rejected the payload (bad reading, missing table). Log the body
+    // verbatim: it carries the actionable hint.
+    Serial.print("CLOUD: respond rejected: ");
+    Serial.println(response);
+    return false;
+  }
+  Serial.printf("CLOUD: uploaded sequence %lu.\n", static_cast<unsigned long>(sample.sequence));
+  return true;
+}
+
+// One poll cycle. Returns false when the round failed, so the caller can back off.
+bool runCloudPollCycle() {
+  String response;
+  String url = cloudEndpoint("/command/poll");
+  url += "?deviceId=";
+  url += PLANT_CLOUD_DEVICE_ID;
+
+  const int status = cloudRequest("GET", url, String(), &response);
+  if (status != 200) {
+    Serial.printf("CLOUD: poll failed, HTTP %d.\n", status);
+    return false;
+  }
+  if (!jsonBoolIsTrue(response, "hasCommand")) {
+    return true;  // idle, nothing to do
+  }
+
+  String commandID;
+  if (!extractJSONString(response, "commandId", &commandID) || commandID.isEmpty()) {
+    Serial.println("CLOUD: poll returned a command without an id.");
+    return false;
+  }
+
+  String action;
+  extractJSONString(response, "action", &action);
+  if (action.length() > 0 && action != "refresh_sensor" && action != "read_sensor") {
+    // Unknown actions are left pending rather than silently consumed, so a newer
+    // firmware can pick them up.
+    Serial.print("CLOUD: ignoring unsupported action ");
+    Serial.println(action);
+    return true;
+  }
+
+  Serial.print("CLOUD: remote sampling requested by command ");
+  Serial.println(commandID);
+
+  CloudSampleResult sample = {};
+  if (!requestSampleFromMainLoop(&sample)) {
+    return false;
+  }
+  return uploadCloudSample(commandID, sample);
+}
+
+void cloudTask(void *) {
+  // Let BLE finish advertising and the first sample settle before bringing the
+  // second radio up.
+  vTaskDelay(pdMS_TO_TICKS(5000));
+
+  for (;;) {
+    if (!ensureWiFiConnected()) {
+      vTaskDelay(pdMS_TO_TICKS(CLOUD_WIFI_RETRY_MS));
+      continue;
+    }
+    const bool ok = runCloudPollCycle();
+    vTaskDelay(pdMS_TO_TICKS(ok ? CLOUD_POLL_INTERVAL_MS : CLOUD_POLL_BACKOFF_MS));
+  }
+}
+
+void initializeCloudTask() {
+  if (strlen(PLANT_CLOUD_AUTH_TOKEN) == 0) {
+    Serial.println("CLOUD: AUTH_TOKEN is empty; remote sampling disabled.");
+    return;
+  }
+
+  cloudSampleMutex = xSemaphoreCreateMutex();
+  if (cloudSampleMutex == nullptr) {
+    Serial.println("CLOUD: could not create sample mutex; remote sampling disabled.");
+    return;
+  }
+
+  const BaseType_t created = xTaskCreatePinnedToCore(
+    cloudTask,
+    "cloudPoll",
+    CLOUD_TASK_STACK_BYTES,
+    nullptr,
+    CLOUD_TASK_PRIORITY,
+    &cloudTaskHandle,
+    CLOUD_TASK_CORE
+  );
+  if (created != pdPASS) {
+    Serial.println("CLOUD: could not start poll task; remote sampling disabled.");
+    vSemaphoreDelete(cloudSampleMutex);
+    cloudSampleMutex = nullptr;
+    return;
+  }
+  Serial.printf(
+    "CLOUD: remote sampling enabled, polling every %lu ms as device %s.\n",
+    CLOUD_POLL_INTERVAL_MS,
+    PLANT_CLOUD_DEVICE_ID
+  );
+}
+#endif
+
+static const uint8_t LED_PINS[] = {2, 4, 5, 12, 13, 14, 15, 18, 23};
+
+void wifiLedTask(void *) {
+  for (uint8_t pin : LED_PINS) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
+  bool ledState = false;
+  for (;;) {
+#if PLANT_CLOUD_ENABLED
+    if (WiFi.status() == WL_CONNECTED) {
+      // 常亮 (同时给 HIGH，若是共阳极低电平驱动则反向交替)
+      for (uint8_t pin : LED_PINS) {
+        digitalWrite(pin, HIGH);
+      }
+      vTaskDelay(pdMS_TO_TICKS(200));
+    } else {
+      // 慢闪 (500ms 亮 / 500ms 灭)
+      ledState = !ledState;
+      for (uint8_t pin : LED_PINS) {
+        digitalWrite(pin, ledState ? HIGH : LOW);
+      }
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+#else
+    for (uint8_t pin : LED_PINS) {
+      digitalWrite(pin, LOW);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  xTaskCreate(wifiLedTask, "wifiLedTask", 2048, nullptr, 1, nullptr);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(100000);
@@ -895,6 +1331,12 @@ void setup() {
   Serial.println("Waiting up to 15 seconds for iPhone time sync before first sample.");
   lastSampleTime = millis();
   initialSampleDeadline = lastSampleTime + BOOT_TIME_SYNC_GRACE_MS;
+
+#if PLANT_CLOUD_ENABLED
+  initializeCloudTask();
+#else
+  Serial.println("Remote sampling not compiled in (no CloudConfig.h); BLE-only mode.");
+#endif
 }
 
 void loop() {

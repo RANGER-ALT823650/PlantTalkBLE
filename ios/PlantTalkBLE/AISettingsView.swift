@@ -697,6 +697,7 @@ struct CloudSyncSettingsView: View {
     let database: PlantDatabase
     @AppStorage("plant_talk_cloud_sync_url") private var syncURL: String = ""
     @AppStorage("plant_talk_cloud_sync_token") private var syncToken: String = ""
+    @AppStorage(PlantRemoteSampling.deviceIDDefaultsKey) private var remoteDeviceID: String = ""
     @StateObject private var syncService = CloudSyncService.shared
 
     var body: some View {
@@ -716,7 +717,20 @@ struct CloudSyncSettingsView: View {
             } header: {
                 Text("同步密钥")
             } footer: {
-                Text("如果在 FC 环境变量中配置了 AUTH_TOKEN，请在此填写对应的密钥。")
+                Text("云端已强制校验 AUTH_TOKEN。请填写与 FC 环境变量 AUTH_TOKEN 完全一致的值，否则所有同步请求都会被拒绝。")
+            }
+
+            Section {
+                TextField(PlantRemoteSampling.fallbackDeviceID, text: $remoteDeviceID)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            } header: {
+                Text("远程采样设备 ID")
+            } footer: {
+                // 这个值不能沿用蓝牙的设备标识：蓝牙那个是 CoreBluetooth 分配的
+                // peripheral UUID，只有 iOS 知道，ESP32 无从得知。两端必须约定
+                // 同一个字符串，否则指令投给了一个设备、硬件在另一个设备名下轮询。
+                Text("必须与 ESP32 固件 CloudConfig.h 里的 PLANT_CLOUD_DEVICE_ID 完全一致，远程采样才能送达。留空则使用 \(PlantRemoteSampling.fallbackDeviceID)。")
             }
 
             Section {

@@ -41,6 +41,10 @@ TABLE_MESSAGES = 'messages'
 TABLE_DELETIONS = 'deletions'
 TABLE_SENSOR_READINGS = 'sensor_readings'
 TABLE_COMMANDS = 'commands'
+# 每台设备当前待办指令的单行索引。主键 device_id，只存一行。
+# ESP32 每几秒轮询一次，若直接在 commands 表里扫 pending，指令表只增不删，
+# 跑几个月后每次轮询都要扫全表。这张表把轮询固定成一次单行点查。
+TABLE_DEVICE_PENDING = 'device_pending'
 
 ENTITY_CONVERSATION = 'conversation'
 ENTITY_MESSAGE = 'message'
@@ -49,6 +53,22 @@ ENTITY_MESSAGE = 'message'
 BATCH_WRITE_LIMIT = 200
 # 单次 GetRange 的页大小；配合 next_start_primary_key 翻页，不做总量截断
 RANGE_PAGE_SIZE = 500
+
+# 远程采样指令的存活时长。超过这个时间没被设备取走就算作废：
+# 否则设备离线期间堆积的 pending 会在它下次上线时被立刻执行，
+# 用户看到的是一条几天前请求的"即时"读数。
+COMMAND_TTL_MS = 60 * 1000
+
+# 指令接口的路径。旧的复数写法一并保留，避免升级后老客户端 404。
+COMMAND_CREATE_PATHS = ('/command/create', '/commands/create')
+COMMAND_RESPOND_PATHS = ('/command/respond', '/commands/respond')
+COMMAND_POLL_PATHS = ('/command/poll', '/commands/poll')
+COMMAND_STATUS_PATHS = ('/command/status', '/commands/status')
+
+
+def now_ms():
+    """当前毫秒时间戳。抽成函数是为了让测试能够冻结时间验证过期逻辑。"""
+    return int(time.time() * 1000)
 
 
 def get_ots_client():
@@ -138,6 +158,7 @@ TABLE_PRIMARY_KEYS = {
     TABLE_DELETIONS: 'entity_type(字符串)、entity_id(字符串)',
     TABLE_SENSOR_READINGS: 'device_id(字符串)、sequence(整数)',
     TABLE_COMMANDS: 'command_id(字符串)',
+    TABLE_DEVICE_PENDING: 'device_id(字符串)',
 }
 
 
@@ -681,11 +702,75 @@ def handle_pull(client, query_params):
     return result
 
 
+def read_single_row(client, table_name, primary_key, missing_tables=None):
+    """
+    按主键点查一行，返回属性字典；行不存在或表不存在时返回 None。
+
+    不要用 iter_range 做点查：Tablestore 的区间是 start 闭 end 开，
+    [id, id) 恒为空区间，那样写永远查不到任何一行。
+
+    传入 missing_tables 集合可区分"表不存在"与"行不存在"——两者都返回 None，
+    但只有前者才该触发降级扫表。轮询侧靠这个区分避免空闲时反复全表扫描。
+    """
+    try:
+        _, row, _ = client.get_row(table_name, primary_key)
+    except Exception as error:
+        if is_table_missing(error):
+            if missing_tables is not None:
+                missing_tables.add(table_name)
+            return None
+        raise
+    if row is None:
+        return None
+    return extract_attrs(row)
+
+
+def new_command_id(created_ms):
+    """
+    指令 ID。随机后缀用 os.urandom，不能用时间戳的低位——
+    原实现的后缀是 `int(time.time()*1000) % 1000`，即前缀毫秒数的后三位，
+    同一毫秒内的两次请求会生成完全相同的 ID，后者直接覆盖前者。
+    """
+    suffix = base64.b16encode(os.urandom(4)).decode('ascii').lower()
+    return f"cmd_{created_ms}_{suffix}"
+
+
+def command_view(command_id, attrs, at_ms):
+    """把 commands 表的一行整理成对外的状态视图，并就地判定是否已过期。"""
+    status = as_text(attrs.get('status'), 'pending')
+    expires_at = as_int(attrs.get('expires_at'), 0)
+    if status == 'pending' and expires_at and at_ms > expires_at:
+        status = 'expired'
+
+    reading = None
+    result_json = as_text(attrs.get('result_reading'))
+    if result_json:
+        try:
+            reading = json.loads(result_json)
+        except (TypeError, ValueError):
+            reading = None
+
+    view = {
+        'success': True,
+        'commandId': command_id,
+        'command_id': command_id,
+        'status': status,
+        'action': as_text(attrs.get('action'), 'refresh_sensor'),
+        'deviceId': as_text(attrs.get('device_id')),
+        'createdAt': as_int(attrs.get('created_at'), 0),
+        'reading': reading,
+    }
+    if status == 'expired':
+        view['error'] = '设备未在有效期内取走该指令，请确认 ESP32 已联网。'
+    return view
+
+
 def handle_create_command(client, body_data):
     device_id = as_text(body_data.get('deviceId') or body_data.get('device_id') or 'default_device').strip()
     action = as_text(body_data.get('action') or 'refresh_sensor').strip()
-    now_ms = int(time.time() * 1000)
-    command_id = f"cmd_{now_ms}_{int(time.time() * 1000) % 1000}"
+    created_at = now_ms()
+    expires_at = created_at + COMMAND_TTL_MS
+    command_id = new_command_id(created_at)
 
     row = (
         [('command_id', command_id)],
@@ -693,7 +778,8 @@ def handle_create_command(client, body_data):
             ('device_id', device_id),
             ('action', action),
             ('status', 'pending'),
-            ('created_at', now_ms),
+            ('created_at', created_at),
+            ('expires_at', expires_at),
             ('result_reading', '')
         ]
     )
@@ -704,17 +790,62 @@ def handle_create_command(client, body_data):
             return {'success': False, 'error': f"表 '{TABLE_COMMANDS}' 不存在，请在 Tablestore 控制台创建。"}
         raise
 
-    return {
+    # 更新该设备的待办索引，让 ESP32 轮询只需读这一行。
+    # 索引写失败不该让指令创建失败：轮询侧会在索引缺失时降级为扫表。
+    pending_indexed = True
+    try:
+        write_rows(client, TABLE_DEVICE_PENDING, [(
+            [('device_id', device_id)],
+            [('command_id', command_id), ('action', action), ('updated_at', created_at), ('expires_at', expires_at)]
+        )])
+    except Exception as error:
+        if not is_table_missing(error):
+            raise
+        pending_indexed = False
+
+    result = {
         'success': True,
         'commandId': command_id,
         'command_id': command_id,
         'status': 'pending',
-        'createdAt': now_ms
+        'createdAt': created_at,
+        'expiresAt': expires_at,
+        'ttlMs': COMMAND_TTL_MS,
     }
+    if not pending_indexed:
+        result['pending_index_hint'] = missing_tables_hint({TABLE_DEVICE_PENDING})
+    return result
 
 
-def handle_poll_command(client, query_params):
-    device_id = as_text(query_params.get('deviceId') or query_params.get('device_id') or 'default_device').strip()
+def clear_pending_index(client, device_id, command_id):
+    """
+    清掉设备待办索引，但只在它仍指向 command_id 时才清。
+
+    条件检查是必需的：指令被取走的同时用户可能又发了一条新指令，
+    无条件删除会把那条新指令的索引一起抹掉，设备再也轮询不到它。
+    """
+    if not device_id:
+        return
+    attrs = read_single_row(client, TABLE_DEVICE_PENDING, [('device_id', device_id)])
+    if attrs is None:
+        return
+    if as_text(attrs.get('command_id')) != command_id:
+        return
+    try:
+        write_rows(client, TABLE_DEVICE_PENDING, [([('device_id', device_id)], None)])
+    except Exception as error:
+        if not is_table_missing(error):
+            raise
+
+
+def scan_pending_command(client, device_id, at_ms):
+    """
+    索引表不可用时的兜底：扫 commands 表找该设备最新的未过期 pending。
+
+    这是老部署（没建 device_pending 表）的降级路径，会全表扫描。
+    正常路径走 handle_poll_command 里的单行点查。
+    """
+    best = None
     try:
         for row in iter_range(
             client,
@@ -722,41 +853,167 @@ def handle_poll_command(client, query_params):
             [('command_id', INF_MIN)],
             [('command_id', INF_MAX)]
         ):
-            cmd_id = row.primary_key[0][1]
             attrs = extract_attrs(row)
-            if attrs.get('status') == 'pending':
-                target_dev = as_text(attrs.get('device_id'))
-                if not target_dev or target_dev == device_id or device_id == 'default_device':
-                    return {
-                        'success': True,
-                        'hasCommand': True,
-                        'commandId': cmd_id,
-                        'command_id': cmd_id,
-                        'action': as_text(attrs.get('action'), 'refresh_sensor')
-                    }
+            if as_text(attrs.get('status')) != 'pending':
+                continue
+            expires_at = as_int(attrs.get('expires_at'), 0)
+            if expires_at and at_ms > expires_at:
+                continue
+            target_dev = as_text(attrs.get('device_id'))
+            if target_dev and target_dev != device_id:
+                continue
+            created_at = as_int(attrs.get('created_at'), 0)
+            if best is None or created_at >= best[1]:
+                best = (row.primary_key[0][1], created_at, as_text(attrs.get('action'), 'refresh_sensor'))
     except Exception as error:
-        if is_table_missing(error):
-            return {'success': True, 'hasCommand': False}
-        raise
+        if not is_table_missing(error):
+            raise
+        return None
+    if best is None:
+        return None
+    return {'commandId': best[0], 'action': best[2]}
 
-    return {'success': True, 'hasCommand': False}
+
+def handle_poll_command(client, query_params):
+    """ESP32 每几秒调用一次。正常路径是一次单行点查，不扫表。"""
+    device_id = as_text(query_params.get('deviceId') or query_params.get('device_id') or 'default_device').strip()
+    at_ms = now_ms()
+
+    # 只有索引表本身不存在（老部署）才降级扫表。索引行不存在只说明当前
+    # 没有待办——那是绝大多数轮询的结果，此时扫表会让轮询的开销回到原点。
+    missing_tables = set()
+    index_attrs = read_single_row(
+        client, TABLE_DEVICE_PENDING, [('device_id', device_id)], missing_tables
+    )
+    candidate = None
+    if TABLE_DEVICE_PENDING in missing_tables:
+        candidate = scan_pending_command(client, device_id, at_ms)
+    elif index_attrs is not None:
+        command_id = as_text(index_attrs.get('command_id')).strip()
+        expires_at = as_int(index_attrs.get('expires_at'), 0)
+        if command_id and not (expires_at and at_ms > expires_at):
+            candidate = {
+                'commandId': command_id,
+                'action': as_text(index_attrs.get('action'), 'refresh_sensor'),
+            }
+        elif command_id:
+            # 索引里那条已经过期，顺手清掉，别让它一直占着位置。
+            clear_pending_index(client, device_id, command_id)
+
+    if candidate is None:
+        return {'success': True, 'hasCommand': False}
+
+    # 用 commands 表核对真实状态：索引可能因为 respond 时写失败而滞后。
+    attrs = read_single_row(client, TABLE_COMMANDS, [('command_id', candidate['commandId'])])
+    if attrs is not None:
+        if as_text(attrs.get('status')) != 'pending':
+            clear_pending_index(client, device_id, candidate['commandId'])
+            return {'success': True, 'hasCommand': False}
+        expires_at = as_int(attrs.get('expires_at'), 0)
+        if expires_at and at_ms > expires_at:
+            clear_pending_index(client, device_id, candidate['commandId'])
+            return {'success': True, 'hasCommand': False}
+
+    return {
+        'success': True,
+        'hasCommand': True,
+        'commandId': candidate['commandId'],
+        'command_id': candidate['commandId'],
+        'action': candidate['action'],
+    }
+
+
+def sensor_reading_row(reading, received_ms):
+    """
+    把设备回填的读数整理成 sensor_readings 的一行。数据不可用时抛 ValueError。
+
+    sequence 必须由设备提供：缺失时若退化成某个默认值，多条读数会写到
+    同一主键上互相覆盖（push 路径的既有测试正是为此拒收无 sequence 的读数）。
+    """
+    if not isinstance(reading, dict) or not reading:
+        raise ValueError('回填内容为空')
+
+    device_id = as_text(reading.get('deviceId') or reading.get('device_id') or '').strip()
+    if not device_id:
+        raise ValueError('读数缺失 deviceId')
+
+    raw_seq = reading.get('sequence')
+    if raw_seq is None:
+        raise ValueError('读数缺失 sequence')
+    seq = as_int(raw_seq, -1)
+    if seq < 0:
+        raise ValueError('读数 sequence 非法')
+
+    attrs = [
+        ('recorded_at', as_int(reading.get('recordedAt') or reading.get('recorded_at'), received_ms)),
+        ('received_at', received_ms),
+        ('timestamp_estimated', bool(reading.get('timestampEstimated') or reading.get('timestamp_estimated'))),
+        ('soil_raw', as_int(reading.get('soilRaw') or reading.get('soil_raw'), 0)),
+    ]
+    temp = reading.get('temperature')
+    hum = reading.get('humidity')
+    light = reading.get('lightLux') if reading.get('lightLux') is not None else reading.get('light_lux')
+    if temp is not None:
+        attrs.append(('temperature', float(temp)))
+    if hum is not None:
+        attrs.append(('humidity', float(hum)))
+    if light is not None:
+        attrs.append(('light_lux', float(light)))
+
+    return [('device_id', device_id), ('sequence', seq)], attrs, device_id
 
 
 def handle_respond_command(client, body_data):
+    """ESP32 采样完成后回填。读数写入失败时指令不标 completed。"""
     command_id = as_text(body_data.get('commandId') or body_data.get('command_id')).strip()
     if not command_id:
         return {'success': False, 'error': '缺失 commandId'}
-    
-    now_ms = int(time.time() * 1000)
+
+    received_at = now_ms()
     reading = body_data.get('reading') or body_data.get('sensorReading') or {}
-    reading_json = json.dumps(reading)
+
+    existing = read_single_row(client, TABLE_COMMANDS, [('command_id', command_id)])
+    if existing is None:
+        return {'success': False, 'error': '未找到对应指令', 'status': 'not_found'}
+
+    # 先把读数落到 sensor_readings，成功了才把指令标成 completed。
+    # 反过来做的话，App 会看到 completed 却拿不到数据，无从判断哪里出了问题。
+    device_id = as_text(existing.get('device_id'))
+    stored_reading = False
+    if reading:
+        try:
+            primary_key, attrs, reading_device = sensor_reading_row(reading, received_at)
+        except ValueError as error:
+            return {
+                'success': False,
+                'commandId': command_id,
+                'status': as_text(existing.get('status'), 'pending'),
+                'error': f'读数格式不合法：{error}',
+            }
+        try:
+            write_rows(client, TABLE_SENSOR_READINGS, [(primary_key, attrs)])
+            stored_reading = True
+        except Exception as error:
+            if not is_table_missing(error):
+                raise
+            return {
+                'success': False,
+                'commandId': command_id,
+                'status': as_text(existing.get('status'), 'pending'),
+                'error': missing_tables_hint({TABLE_SENSOR_READINGS}),
+            }
+        device_id = device_id or reading_device
 
     row = (
         [('command_id', command_id)],
         [
+            ('device_id', device_id),
+            ('action', as_text(existing.get('action'), 'refresh_sensor')),
             ('status', 'completed'),
-            ('updated_at', now_ms),
-            ('result_reading', reading_json)
+            ('created_at', as_int(existing.get('created_at'), received_at)),
+            ('expires_at', as_int(existing.get('expires_at'), 0)),
+            ('updated_at', received_at),
+            ('result_reading', json.dumps(reading, ensure_ascii=False) if reading else '')
         ]
     )
     try:
@@ -764,32 +1021,17 @@ def handle_respond_command(client, body_data):
     except Exception as error:
         if not is_table_missing(error):
             raise
+        return {'success': False, 'error': missing_tables_hint({TABLE_COMMANDS})}
 
-    if isinstance(reading, dict) and reading:
-        try:
-            device_id = as_text(reading.get('deviceId') or reading.get('device_id') or 'default_device')
-            seq = as_int(reading.get('sequence'), now_ms // 1000)
-            rec_at = as_int(reading.get('recordedAt') or reading.get('recorded_at'), now_ms)
-            soil = as_int(reading.get('soilRaw') or reading.get('soil_raw'), 0)
-            temp = reading.get('temperature')
-            hum = reading.get('humidity')
-            light = reading.get('lightLux') if reading.get('lightLux') is not None else reading.get('light_lux')
-            
-            attrs = [
-                ('recorded_at', rec_at),
-                ('received_at', now_ms),
-                ('timestamp_estimated', False),
-                ('soil_raw', soil)
-            ]
-            if temp is not None: attrs.append(('temperature', float(temp)))
-            if hum is not None: attrs.append(('humidity', float(hum)))
-            if light is not None: attrs.append(('light_lux', float(light)))
-            
-            write_rows(client, TABLE_SENSOR_READINGS, [([('device_id', device_id), ('sequence', seq)], attrs)])
-        except Exception:
-            pass
+    clear_pending_index(client, device_id, command_id)
 
-    return {'success': True, 'commandId': command_id, 'status': 'completed'}
+    return {
+        'success': True,
+        'commandId': command_id,
+        'command_id': command_id,
+        'status': 'completed',
+        'storedReading': stored_reading,
+    }
 
 
 def handle_get_command_status(client, query_params):
@@ -797,29 +1039,10 @@ def handle_get_command_status(client, query_params):
     if not command_id:
         return {'success': False, 'error': '缺失 commandId'}
 
-    try:
-        rows = list(iter_range(
-            client,
-            TABLE_COMMANDS,
-            [('command_id', command_id)],
-            [('command_id', command_id)]
-        ))
-        if rows:
-            attrs = extract_attrs(rows[0])
-            status = as_text(attrs.get('status'), 'pending')
-            result_json = as_text(attrs.get('result_reading'))
-            reading = json.loads(result_json) if result_json else None
-            return {
-                'success': True,
-                'commandId': command_id,
-                'status': status,
-                'reading': reading
-            }
-    except Exception as error:
-        if not is_table_missing(error):
-            raise
-
-    return {'success': False, 'error': '未找到对应指令', 'status': 'not_found'}
+    attrs = read_single_row(client, TABLE_COMMANDS, [('command_id', command_id)])
+    if attrs is None:
+        return {'success': False, 'error': '未找到对应指令', 'status': 'not_found'}
+    return command_view(command_id, attrs, now_ms())
 
 
 def main_logic(method, path, headers, query_params, body_data):
@@ -837,11 +1060,19 @@ def main_logic(method, path, headers, query_params, body_data):
             'solution': "请在 FC 3.0 控制台【代码】页面的下方终端 (Terminal) 中运行命令: pip install tablestore -t . 部署后重试。"
         }
 
-    # 校验 Token。注意：未配置 AUTH_TOKEN 时接口对公网完全开放，
-    # 务必在 FC 环境变量里设置 AUTH_TOKEN。
-    auth_token = headers.get('x-auth-token') or headers.get('X-Auth-Token') or ''
+    # 强制校验 Token。以前未配置 AUTH_TOKEN 时接口对公网完全开放，
+    # 在只读同步阶段那还只是数据泄露；现在 /command/create 能驱动用户家里的
+    # 硬件采样，未鉴权的开放接口等于把设备控制权交给任何人。因此没配
+    # AUTH_TOKEN 一律拒绝服务，而不是放行。
     expected_token = os.environ.get('AUTH_TOKEN', '').strip()
-    if expected_token and auth_token != expected_token:
+    if not expected_token:
+        return 503, cors_headers, {
+            'error': 'Service Unavailable: 未配置 AUTH_TOKEN，接口已停止服务。',
+            'solution': "请在 FC 控制台【配置 -> 环境变量】中设置 AUTH_TOKEN，并在各客户端的云同步设置里填写同一个值。"
+        }
+
+    auth_token = headers.get('x-auth-token') or headers.get('X-Auth-Token') or ''
+    if auth_token != expected_token:
         return 401, cors_headers, {'error': 'Unauthorized: 无效的 x-auth-token'}
 
     client = get_ots_client()
@@ -849,9 +1080,11 @@ def main_logic(method, path, headers, query_params, body_data):
     clean_path = path.rstrip('/')
 
     if method == 'POST':
-        if clean_path in ('/command/create', '/commands/create') or body_data.get('action') == 'create_command':
+        # 指令路由以路径为准。ESP32 固件按固定路径请求，无需靠 body 字段猜测；
+        # 只保留 action=create_command 这一个显式兜底，供无法自定义路径的调用方使用。
+        if clean_path in COMMAND_CREATE_PATHS or body_data.get('action') == 'create_command':
             return 200, cors_headers, handle_create_command(client, body_data)
-        if clean_path in ('/command/respond', '/commands/respond') or 'commandId' in body_data and 'reading' in body_data:
+        if clean_path in COMMAND_RESPOND_PATHS:
             return 200, cors_headers, handle_respond_command(client, body_data)
 
         is_push = (
@@ -866,9 +1099,9 @@ def main_logic(method, path, headers, query_params, body_data):
             return 200, cors_headers, handle_push(client, body_data)
 
     if method == 'GET':
-        if clean_path in ('/command/poll', '/commands/poll'):
+        if clean_path in COMMAND_POLL_PATHS:
             return 200, cors_headers, handle_poll_command(client, query_params)
-        if clean_path in ('/command/status', '/commands/status') or ('commandId' in query_params or 'command_id' in query_params):
+        if clean_path in COMMAND_STATUS_PATHS or 'commandId' in query_params or 'command_id' in query_params:
             return 200, cors_headers, handle_get_command_status(client, query_params)
 
         is_pull = (

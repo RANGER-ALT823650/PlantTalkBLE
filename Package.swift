@@ -54,7 +54,8 @@ let package = Package(
                 "PlantConversationBinding.swift",
                 "PlantDataTools.swift",
                 "PlantDatabase.swift",
-                "PlantReading.swift"
+                "PlantReading.swift",
+                "PlantRemoteSampling.swift"
             ]
         )
     ]
