@@ -1712,14 +1712,24 @@ struct TextConversationView: View {
                 }
 
                 if staged.presentation == .messageFlight {
-                    onMessageFlightRequested(MessageFlightRequest(
-                        id: staged.id,
-                        text: staged.text,
-                        imageAttachments: staged.imageAttachments,
-                        createdAt: staged.createdAt,
-                        sourceFrame: composerFrame,
-                        showsOverlayWhilePreparing: false
-                    ))
+                    var transferTransaction = Transaction(animation: nil)
+                    transferTransaction.disablesAnimations = true
+                    withTransaction(transferTransaction) {
+                        onMessageFlightRequested(MessageFlightRequest(
+                            id: staged.id,
+                            text: staged.text,
+                            imageAttachments: staged.imageAttachments,
+                            createdAt: staged.createdAt,
+                            sourceFrame: composerFrame
+                        ))
+                        if trimmedDraft == staged.composerText {
+                            draft = ""
+                        }
+                        if pendingImageAttachments.map(\.id)
+                            == staged.composerAttachments.map(\.id) {
+                            pendingImageAttachments = []
+                        }
+                    }
                 }
             }
             let turn = ActiveTextTurn(
@@ -2614,6 +2624,7 @@ private struct ChatBubblePayload: View {
     let text: String
     let rendersMarkdown: Bool
     let usesStableTextWidth: Bool
+    let verticalSpacing: CGFloat
     let imageAttachments: [ChatImageAttachment]
     let activeImagePreviewSourceID: String?
     let onImagePreview: ConversationImagePreviewAction?
@@ -2624,6 +2635,7 @@ private struct ChatBubblePayload: View {
         text: String,
         rendersMarkdown: Bool = false,
         usesStableTextWidth: Bool = false,
+        verticalSpacing: CGFloat = 7,
         imageAttachments: [ChatImageAttachment] = [],
         activeImagePreviewSourceID: String? = nil,
         onImagePreview: ConversationImagePreviewAction? = nil,
@@ -2633,6 +2645,7 @@ private struct ChatBubblePayload: View {
         self.text = text
         self.rendersMarkdown = rendersMarkdown
         self.usesStableTextWidth = usesStableTextWidth
+        self.verticalSpacing = verticalSpacing
         self.imageAttachments = imageAttachments
         self.activeImagePreviewSourceID = activeImagePreviewSourceID
         self.onImagePreview = onImagePreview
@@ -2641,7 +2654,7 @@ private struct ChatBubblePayload: View {
     }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 7) {
+        VStack(alignment: .trailing, spacing: verticalSpacing) {
             if !imageAttachments.isEmpty {
                 ChatBubbleImageGrid(
                     attachments: imageAttachments,
@@ -3541,58 +3554,32 @@ private struct ChatBubbleImageGrid: View {
     }
 }
 
-struct MessageFlightPayload: View {
+/// The flight layer reuses the settled user bubble instead of maintaining a
+/// second, approximate visual implementation. Its parent stretches the surface
+/// over the composer at takeoff; the hidden row reserves its exact final frame.
+struct MessageFlightBubble: View {
     let text: String
     let imageAttachments: [ChatImageAttachment]
+    let createdAt: Date
+    let layoutProgress: CGFloat
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if !imageAttachments.isEmpty {
-                MessageFlightImageGrid(attachments: imageAttachments)
-            }
+        let progress = min(max(layoutProgress, 0), 1)
+        let verticalPadding = 4 + (11 - 4) * progress
+        let payloadSpacing = 7 * progress
 
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(text)
-                    .foregroundStyle(.primary)
-                    .lineLimit(5)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-private struct MessageFlightImageGrid: View {
-    let attachments: [ChatImageAttachment]
-
-    var body: some View {
-        let images = attachments.compactMap { UIImage(data: $0.data) }
-        Group {
-            if images.count > 1 {
-                HStack(spacing: ConversationAttachmentLayout.itemSpacing) {
-                    ForEach(Array(images.enumerated()), id: \.offset) { _, image in
-                        imageView(image)
-                    }
-                }
-            } else if let image = images.first {
-                imageView(image)
-            }
-        }
-        .frame(height: ConversationAttachmentLayout.itemSide)
-    }
-
-    private func imageView(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFill()
-            .frame(
-                width: ConversationAttachmentLayout.itemSide,
-                height: ConversationAttachmentLayout.itemSide
+        ChatBubbleSurface(
+            role: .user,
+            fillsAvailableSpace: true,
+            verticalPadding: verticalPadding
+        ) {
+            ChatBubblePayload(
+                text: text,
+                verticalSpacing: payloadSpacing,
+                imageAttachments: imageAttachments,
+                createdAt: createdAt
             )
-            .clipShape(RoundedRectangle(
-                cornerRadius: ConversationAttachmentLayout.cornerRadius,
-                style: .continuous
-            ))
+        }
     }
 }
 
@@ -3940,10 +3927,19 @@ struct ModelThinkingIndicator: View {
 
 private struct ChatBubbleSurface<Content: View>: View {
     let role: ChatRole
+    let fillsAvailableSpace: Bool
+    let verticalPadding: CGFloat
     private let content: Content
 
-    init(role: ChatRole, @ViewBuilder content: () -> Content) {
+    init(
+        role: ChatRole,
+        fillsAvailableSpace: Bool = false,
+        verticalPadding: CGFloat = 11,
+        @ViewBuilder content: () -> Content
+    ) {
         self.role = role
+        self.fillsAvailableSpace = fillsAvailableSpace
+        self.verticalPadding = verticalPadding
         self.content = content()
     }
 
@@ -3982,11 +3978,23 @@ private struct ChatBubbleSurface<Content: View>: View {
         }
     }
 
+    @ViewBuilder
     private var paddedContent: some View {
-        content
+        let padded = content
             .padding(.leading, role == .user ? 14 : 20)
             .padding(.trailing, role == .user ? 20 : 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, verticalPadding)
+
+        if fillsAvailableSpace {
+            padded
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .leading
+                )
+        } else {
+            padded
+        }
     }
 
     private func bubbleOutline(for shape: ChatBubbleShape) -> some View {
@@ -4474,9 +4482,7 @@ struct TextConversationImageInteractionPreview: View {
                 ProgressView("正在准备离线对话…")
             }
 
-            if let activeFlight,
-               activeFlight.hasStarted
-                || activeFlight.request.showsOverlayWhilePreparing {
+            if let activeFlight {
                 MessageFlightOverlay(flight: activeFlight)
                     .allowsHitTesting(false)
                     .zIndex(100)
@@ -4555,10 +4561,10 @@ struct TextConversationImageInteractionPreview: View {
             guard activeFlight?.request.id == id else { return }
             withAnimation(
                 reduceMotion ? nil : .smooth(duration: 0.32),
-                completionCriteria: .logicallyComplete
+                completionCriteria: .removed
             ) {
                 activeFlight?.currentFrame = destination
-                activeFlight?.progress = 1
+                activeFlight?.layoutProgress = 1
             } completion: {
                 completeFlight(id)
             }

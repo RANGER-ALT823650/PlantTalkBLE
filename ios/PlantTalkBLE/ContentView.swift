@@ -168,29 +168,26 @@ struct MessageFlightRequest: Equatable {
     let imageAttachments: [ChatImageAttachment]
     let createdAt: Date
     let sourceFrame: CGRect
-    let showsOverlayWhilePreparing: Bool
 
     init(
         id: UUID,
         text: String,
         imageAttachments: [ChatImageAttachment] = [],
         createdAt: Date,
-        sourceFrame: CGRect,
-        showsOverlayWhilePreparing: Bool
+        sourceFrame: CGRect
     ) {
         self.id = id
         self.text = text
         self.imageAttachments = imageAttachments
         self.createdAt = createdAt
         self.sourceFrame = sourceFrame
-        self.showsOverlayWhilePreparing = showsOverlayWhilePreparing
     }
 }
 
 struct ActiveMessageFlight: Equatable {
     let request: MessageFlightRequest
     var currentFrame: CGRect
-    var progress: CGFloat = 0
+    var layoutProgress: CGFloat = 0
     var hasStarted = false
 }
 
@@ -316,9 +313,7 @@ struct ContentView: View {
                     ZStack {
                         screenLayers
 
-                        if let activeMessageFlight,
-                           activeMessageFlight.hasStarted
-                            || activeMessageFlight.request.showsOverlayWhilePreparing {
+                        if let activeMessageFlight {
                             MessageFlightOverlay(flight: activeMessageFlight)
                                 .allowsHitTesting(false)
                                 .zIndex(100)
@@ -523,7 +518,9 @@ struct ContentView: View {
                             || isInitialTextChatTransitionComplete,
                         completedMessageFlightID: completedMessageFlightID,
                         startedMessageFlightID: startedMessageFlightID,
-                        onMessageFlightRequested: beginMessageFlight,
+                        onMessageFlightRequested: { request in
+                            beginMessageFlight(request)
+                        },
                         onMessageFlightCancelled: cancelMessageFlight,
                         onHome: returnToHome
                     )
@@ -1098,6 +1095,18 @@ struct ContentView: View {
     }
 
     private func startTextConversation(_ launch: TextChatLaunch) {
+        isInitialTextChatTransitionComplete = false
+        completedMessageFlightID = nil
+        beginMessageFlight(
+            MessageFlightRequest(
+                id: launch.id,
+                text: launch.message,
+                createdAt: launch.createdAt,
+                sourceFrame: launch.sourceFrame
+            ),
+            schedulesDestinationValidation: false
+        )
+
         Task { @MainActor in
             do {
                 let plantBinding = try await plantBindingResolver.bindCurrentPlant()
@@ -1105,6 +1114,7 @@ struct ContentView: View {
                 presentTextConversation(launch.bound(to: plantBinding))
             } catch {
                 guard !Task.isCancelled else { return }
+                cancelMessageFlight(id: launch.id)
                 textChatStartError = error.localizedDescription
                 isTextChatStartErrorPresented = true
             }
@@ -1112,15 +1122,6 @@ struct ContentView: View {
     }
 
     private func presentTextConversation(_ launch: TextChatLaunch) {
-        isInitialTextChatTransitionComplete = false
-        completedMessageFlightID = nil
-        beginMessageFlight(MessageFlightRequest(
-            id: launch.id,
-            text: launch.message,
-            createdAt: launch.createdAt,
-            sourceFrame: launch.sourceFrame,
-            showsOverlayWhilePreparing: true
-        ))
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -1129,6 +1130,7 @@ struct ContentView: View {
             activeTextChat = launch
             isTextConversationPresented = true
         }
+        scheduleMessageFlightDestinationValidation()
     }
 
     private func returnToHome() {
@@ -1280,7 +1282,10 @@ struct ContentView: View {
         }
     }
 
-    private func beginMessageFlight(_ request: MessageFlightRequest) {
+    private func beginMessageFlight(
+        _ request: MessageFlightRequest,
+        schedulesDestinationValidation: Bool = true
+    ) {
         guard !request.sourceFrame.isEmpty else { return }
         messageFlightDestinationValidationTask?.cancel()
         startedMessageFlightID = nil
@@ -1289,7 +1294,9 @@ struct ContentView: View {
             request: request,
             currentFrame: request.sourceFrame
         )
-        scheduleMessageFlightDestinationValidation()
+        if schedulesDestinationValidation {
+            scheduleMessageFlightDestinationValidation()
+        }
     }
 
     private func scheduleMessageFlightDestinationValidation() {
@@ -1376,10 +1383,10 @@ struct ContentView: View {
                   activeMessageFlight?.hasStarted == true else { return }
             withAnimation(
                 reduceMotion ? nil : .smooth(duration: 0.32),
-                completionCriteria: .logicallyComplete
+                completionCriteria: .removed
             ) {
                 activeMessageFlight?.currentFrame = destination
-                activeMessageFlight?.progress = 1
+                activeMessageFlight?.layoutProgress = 1
             } completion: {
                 completeMessageFlight(id: id)
             }
@@ -1924,10 +1931,10 @@ private struct HomeTextComposer: View {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            onSend(launch)
             draft = ""
+            isInputFocused.wrappedValue = false
         }
-        isInputFocused.wrappedValue = false
-        onSend(launch)
         clearRecommittedDraftIfNeeded(afterSubmitting: message)
     }
 
@@ -1958,35 +1965,15 @@ struct MessageFlightOverlay: View {
 
     var body: some View {
         let frame = flight.currentFrame
-        let shape = MessageFlightBubbleShape()
 
-        MessageFlightPayload(
+        MessageFlightBubble(
             text: flight.request.text,
-            imageAttachments: flight.request.imageAttachments
+            imageAttachments: flight.request.imageAttachments,
+            createdAt: flight.request.createdAt,
+            layoutProgress: flight.layoutProgress
         )
-            .padding(.leading, 18 - 4 * flight.progress)
-            .padding(.trailing, 18 + 2 * flight.progress)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background {
-                shape.fill(.ultraThinMaterial)
-                shape.fill(Color.accentColor.opacity(0.2 * flight.progress))
-            }
-            .overlay {
-                shape.stroke(
-                    Color.accentColor.opacity(0.32 * flight.progress),
-                    lineWidth: 0.5
-                )
-            }
-            .clipShape(shape)
             .frame(width: max(1, frame.width), height: max(1, frame.height))
             .position(x: frame.midX, y: frame.midY)
-            .compositingGroup()
-    }
-}
-
-private struct MessageFlightBubbleShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        ChatBubbleShape(tailSide: .trailing).path(in: rect)
     }
 }
 
