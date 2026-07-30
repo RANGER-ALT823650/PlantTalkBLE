@@ -465,6 +465,7 @@ struct ContentView: View {
                     voiceVisualDriver: realtimeConversation.voiceVisualDriver,
                     isInteractionSuppressed: isHomeDashboardInteractionSuppressed,
                     isMotionPaused: isPageTransitionActive,
+                    isOrbMotionPaused: isHomeOrbMotionPaused,
                     onTextSend: startTextConversation,
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
@@ -608,6 +609,13 @@ struct ContentView: View {
     /// the sliding layer, which is a large per-frame cost on iOS 26 glass.
     private var isPageTransitionActive: Bool {
         interactivePageTransition != nil || isInteractivePageSettling
+    }
+
+    private var isHomeOrbMotionPaused: Bool {
+        isPageTransitionActive
+            || isHistoryOverviewPresented
+            || isTextConversationPresented
+            || textConversationTransitionPhase != .idle
     }
 
     private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
@@ -1711,6 +1719,7 @@ private struct HomeDashboard: View {
     let voiceVisualDriver: VoiceVisualDriver
     let isInteractionSuppressed: Bool
     let isMotionPaused: Bool
+    let isOrbMotionPaused: Bool
     let onTextSend: (TextChatLaunch) -> Void
     let onPrimaryButtonTap: () -> Void
 
@@ -1778,7 +1787,7 @@ private struct HomeDashboard: View {
                     PrimaryInteractionButton(
                         realtimeConversationState: realtimeConversationState,
                         voiceVisualDriver: voiceVisualDriver,
-                        isMotionPaused: isMotionPaused,
+                        isMotionPaused: isOrbMotionPaused,
                         onTap: {
                             guard !isInteractionSuppressed else { return }
                             onPrimaryButtonTap()
@@ -2251,6 +2260,8 @@ private struct DiffuseOrb: View {
     let isMotionReduced: Bool
     var isMotionPaused: Bool = false
 
+    @State private var animationClock = PausableAnimationClock()
+
     var body: some View {
         TimelineView(
             .animation(
@@ -2258,9 +2269,12 @@ private struct DiffuseOrb: View {
                 paused: isMotionReduced || isMotionPaused
             )
         ) { timeline in
-            let time = isMotionReduced ? 0 : timeline.date.timeIntervalSinceReferenceDate
-            let phase = time * (0.34 + 0.28 * activity)
-            let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: time)
+            let wallTime = timeline.date.timeIntervalSinceReferenceDate
+            let meshTime = isMotionReduced
+                ? 0
+                : animationClock.time(at: wallTime)
+            let phase = meshTime * (0.34 + 0.28 * activity)
+            let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: wallTime)
             let pulse: Double = switch accent?.kind {
             case .strongPulse:
                 accentEnvelope * (0.055 + 0.04 * (accent?.intensity ?? 0))
@@ -2295,6 +2309,18 @@ private struct DiffuseOrb: View {
             }
         }
         .accessibilityHidden(true)
+        .onAppear {
+            animationClock.setPaused(
+                isMotionPaused,
+                at: Date.now.timeIntervalSinceReferenceDate
+            )
+        }
+        .onChange(of: isMotionPaused) { _, isPaused in
+            animationClock.setPaused(
+                isPaused,
+                at: Date.now.timeIntervalSinceReferenceDate
+            )
+        }
     }
 
     @available(iOS 18.0, *)
@@ -2413,6 +2439,30 @@ private struct DiffuseOrb: View {
     }
 }
 
+/// Converts wall-clock time into an animation time that excludes every paused
+/// interval. Keeping an in-progress pause in the calculation also prevents a
+/// one-frame jump before SwiftUI delivers the corresponding `onChange`.
+private struct PausableAnimationClock {
+    private var accumulatedPauseDuration: TimeInterval = 0
+    private var pauseStartedAt: TimeInterval?
+
+    mutating func setPaused(_ isPaused: Bool, at wallTime: TimeInterval) {
+        if isPaused {
+            if pauseStartedAt == nil {
+                pauseStartedAt = wallTime
+            }
+        } else if let pauseStartedAt {
+            accumulatedPauseDuration += max(0, wallTime - pauseStartedAt)
+            self.pauseStartedAt = nil
+        }
+    }
+
+    func time(at wallTime: TimeInterval) -> TimeInterval {
+        let effectiveWallTime = pauseStartedAt ?? wallTime
+        return effectiveWallTime - accumulatedPauseDuration
+    }
+}
+
 private struct HomeDashboardPreview: View {
     @State var isExpanded: Bool
     @State private var plantArtwork: PlantArtwork?
@@ -2435,6 +2485,7 @@ private struct HomeDashboardPreview: View {
             voiceVisualDriver: VoiceVisualDriver(),
             isInteractionSuppressed: false,
             isMotionPaused: false,
+            isOrbMotionPaused: false,
             onTextSend: { _ in },
             onPrimaryButtonTap: {}
         )
