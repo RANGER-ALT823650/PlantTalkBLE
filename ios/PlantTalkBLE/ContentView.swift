@@ -269,6 +269,10 @@ struct ContentView: View {
     @State private var cachedTextConversationSnapshot: TextConversationTransitionSnapshot?
     @State private var activeTextConversationSnapshot: TextConversationTransitionSnapshot?
     @State private var textConversationSnapshotRefreshTask: Task<Void, Never>?
+    @State private var historyOverviewSnapshotAnchor: UIView?
+    @State private var cachedHistoryOverviewSnapshot: HistoryOverviewTransitionSnapshot?
+    @State private var activeHistoryOverviewSnapshot: HistoryOverviewTransitionSnapshot?
+    @State private var historyOverviewSnapshotRefreshTask: Task<Void, Never>?
     @State private var isPlantDetailsExpanded = false
     @State private var activeTextChat: TextChatLaunch?
     @State private var isTextConversationPresented = false
@@ -414,11 +418,23 @@ struct ContentView: View {
                             onContinueRealtimeConversation: continueRealtimeConversation,
                             onDetailPresentationChanged: { isPresented in
                                 isHistoryDetailPresented = isPresented
+                                if isPresented {
+                                    historyOverviewSnapshotRefreshTask?.cancel()
+                                    historyOverviewSnapshotRefreshTask = nil
+                                } else {
+                                    scheduleHistoryOverviewSnapshotRefresh()
+                                }
                             },
                             onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard,
                             onDeleteGeneratedImage: removeGeneratedImageFromPlantCardIfNeeded
                         )
                             .background(Color(uiColor: .systemBackground))
+                            .background {
+                                TransitionSnapshotAnchor { anchor in
+                                    guard historyOverviewSnapshotAnchor !== anchor else { return }
+                                    historyOverviewSnapshotAnchor = anchor
+                                }
+                            }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
                                     Button(action: hideHistoryOverview) {
@@ -429,11 +445,25 @@ struct ContentView: View {
                             }
                     }
                     .scrollDisabled(interactivePageTransition != nil)
+                    // The page must not take taps mid-transition: the snapshot
+                    // stands in for it, and on the first entry (no cache yet)
+                    // the live page slides in and would otherwise be tappable
+                    // while it moves. Disabling hit testing here — inside the
+                    // gesture attachment below — keeps the dismissal gesture
+                    // itself alive, so an in-flight drag can still settle.
+                    .allowsHitTesting(
+                        activeHistoryOverviewSnapshot == nil
+                            && !isHistoryPageTransitionActive
+                    )
+                    .opacity(activeHistoryOverviewSnapshot == nil ? 1 : 0)
+                    .accessibilityHidden(activeHistoryOverviewSnapshot != nil)
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .history,
                             dragState: interactivePageDragState,
-                            transition: interactivePageTransition,
+                            transition: activeHistoryOverviewSnapshot == nil
+                                ? interactivePageTransition
+                                : nil,
                             isPresented: isHistoryOverviewPresented,
                             pageWidth: geometry.size.width
                         )
@@ -443,6 +473,33 @@ struct ContentView: View {
                     )
                     .transition(historyOverviewTransition)
                     .zIndex(50)
+                    .onChange(of: selectedHistoryTab) { _, _ in
+                        scheduleHistoryOverviewSnapshotRefresh()
+                    }
+                }
+
+                if let activeHistoryOverviewSnapshot {
+                    TransitionSnapshotView(
+                        contentView: activeHistoryOverviewSnapshot.contentView
+                    )
+                    .id(activeHistoryOverviewSnapshot.id)
+                    .frame(
+                        width: activeHistoryOverviewSnapshot.pageSize.width,
+                        height: activeHistoryOverviewSnapshot.pageSize.height
+                    )
+                    .modifier(
+                        InteractivePageOffsetModifier(
+                            page: .history,
+                            dragState: interactivePageDragState,
+                            transition: interactivePageTransition,
+                            isPresented: isHistoryOverviewPresented,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .zIndex(60)
                 }
             }
         }
@@ -463,6 +520,7 @@ struct ContentView: View {
         ) { _ in
             isSoftwareKeyboardVisible = false
             scheduleTextConversationSnapshotRefresh()
+            scheduleHistoryOverviewSnapshotRefresh()
         }
         .alert("无法开始植物对话", isPresented: $isTextChatStartErrorPresented) {
             Button("好", role: .cancel) {}
@@ -648,6 +706,17 @@ struct ContentView: View {
             || textConversationTransitionPhase != .idle
     }
 
+    /// True while the history page is sliding in or out, including the settling
+    /// animation after the finger lifts.
+    private var isHistoryPageTransitionActive: Bool {
+        switch interactivePageTransition {
+        case .presentingHistory, .dismissingHistory:
+            return true
+        case .presentingTextConversation, .dismissingTextConversation, nil:
+            return false
+        }
+    }
+
     private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged { value in
@@ -674,8 +743,20 @@ struct ContentView: View {
                       value.translation.width < 0,
                       isHorizontalSwipe(value.translation) else { return }
 
-                interactivePageTransition = .dismissingHistory
-                interactivePageDragState.translation = value.translation.width
+                // The history page is on screen here, so capture it live and let
+                // the snapshot carry the slide-out.
+                let historySnapshot = captureCurrentHistoryOverviewSnapshot()
+                    ?? cachedSnapshotForHistoryOverview
+                historyOverviewSnapshotRefreshTask?.cancel()
+                historyOverviewSnapshotRefreshTask = nil
+                setWithoutAnimation {
+                    if let historySnapshot {
+                        cachedHistoryOverviewSnapshot = historySnapshot
+                    }
+                    activeHistoryOverviewSnapshot = historySnapshot
+                    interactivePageTransition = .dismissingHistory
+                    interactivePageDragState.translation = value.translation.width
+                }
             }
             .onEnded { value in
                 guard interactivePageTransition == .dismissingHistory else { return }
@@ -736,10 +817,18 @@ struct ContentView: View {
             interactivePageDragState.translation = value.translation.width
         } else if !isTextConversationPresented, value.translation.width > 0 {
             guard let homeSnapshot = captureHomeDashboardSnapshot() else { return }
+            // The history page is not mounted yet at this point, so its snapshot
+            // comes from the cache captured while it was last on screen. When no
+            // valid cache exists (first entry, or a size change), the live page
+            // slides in instead.
+            let historySnapshot = cachedSnapshotForHistoryOverview
+            historyOverviewSnapshotRefreshTask?.cancel()
+            historyOverviewSnapshotRefreshTask = nil
             dismissHomeKeyboardForHistoryOverview()
             suppressHomeDashboardInteraction()
             setWithoutAnimation {
                 activeHomeDashboardSnapshot = homeSnapshot
+                activeHistoryOverviewSnapshot = historySnapshot
                 interactivePageTransition = .presentingHistory
                 interactivePageDragState.translation = value.translation.width
             }
@@ -834,6 +923,9 @@ struct ContentView: View {
         } completion: {
             guard interactivePageTransition == .presentingHistory else { return }
             resetInteractivePageTransition()
+            if shouldPresent {
+                scheduleHistoryOverviewSnapshotRefresh()
+            }
         }
     }
 
@@ -852,6 +944,9 @@ struct ContentView: View {
                     isHistoryDetailPresented = false
                 }
                 resetInteractivePageTransition()
+            }
+            if !shouldDismiss {
+                scheduleHistoryOverviewSnapshotRefresh()
             }
         }
     }
@@ -925,6 +1020,7 @@ struct ContentView: View {
         isInteractivePageSettling = false
         activeHomeDashboardSnapshot = nil
         activeTextConversationSnapshot = nil
+        activeHistoryOverviewSnapshot = nil
         releaseHomeDashboardInteractionAfterGesture()
     }
 
@@ -939,6 +1035,8 @@ struct ContentView: View {
         homeDashboardInteractionReleaseTask = nil
         textConversationSnapshotRefreshTask?.cancel()
         textConversationSnapshotRefreshTask = nil
+        historyOverviewSnapshotRefreshTask?.cancel()
+        historyOverviewSnapshotRefreshTask = nil
         messageFlightDestinationValidationTask?.cancel()
         messageFlightDestinationValidationTask = nil
 
@@ -950,6 +1048,8 @@ struct ContentView: View {
             isInteractivePageSettling = false
             activeHomeDashboardSnapshot = nil
             activeTextConversationSnapshot = nil
+            activeHistoryOverviewSnapshot = nil
+            cachedHistoryOverviewSnapshot = nil
             isHomeDashboardInteractionSuppressed = false
             textConversationTransitionPhase = .idle
 
@@ -1014,6 +1114,83 @@ struct ContentView: View {
             cacheCurrentTextConversationSnapshot()
             textConversationSnapshotRefreshTask = nil
         }
+    }
+
+    private func cacheCurrentHistoryOverviewSnapshot() {
+        guard let snapshot = captureCurrentHistoryOverviewSnapshot() else { return }
+        setWithoutAnimation {
+            cachedHistoryOverviewSnapshot = snapshot
+        }
+    }
+
+    /// The presenting gesture fires before the history page is mounted, so its
+    /// snapshot has to be taken in advance — while the page sits idle on screen.
+    /// Refreshing on tab changes and detail dismissals keeps that cache current.
+    private func scheduleHistoryOverviewSnapshotRefresh() {
+        historyOverviewSnapshotRefreshTask?.cancel()
+        historyOverviewSnapshotRefreshTask = nil
+        guard isHistoryOverviewPresented,
+              !isHistoryDetailPresented,
+              interactivePageTransition == nil,
+              !isSoftwareKeyboardVisible else { return }
+
+        historyOverviewSnapshotRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  isHistoryOverviewPresented,
+                  !isHistoryDetailPresented,
+                  interactivePageTransition == nil,
+                  !isSoftwareKeyboardVisible else { return }
+            cacheCurrentHistoryOverviewSnapshot()
+            historyOverviewSnapshotRefreshTask = nil
+        }
+    }
+
+    private var cachedSnapshotForHistoryOverview: HistoryOverviewTransitionSnapshot? {
+        guard let snapshot = cachedHistoryOverviewSnapshot,
+              snapshot.tab == selectedHistoryTab,
+              let anchor = historyOverviewSnapshotAnchor ?? homeDashboardSnapshotAnchor,
+              let window = anchor.window,
+              abs(snapshot.pageSize.width - window.bounds.width) < 1,
+              abs(snapshot.pageSize.height - window.bounds.height) < 1 else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private func captureCurrentHistoryOverviewSnapshot()
+        -> HistoryOverviewTransitionSnapshot? {
+        guard isHistoryOverviewPresented,
+              !isHistoryDetailPresented,
+              !isSoftwareKeyboardVisible,
+              let anchor = historyOverviewSnapshotAnchor,
+              let window = anchor.window,
+              !anchor.bounds.isEmpty else { return nil }
+
+        let pageRect = anchor.convert(anchor.bounds, to: window)
+        let windowRect = window.bounds
+        let visiblePageRect = pageRect.intersection(windowRect)
+        guard !visiblePageRect.isNull,
+              visiblePageRect.width > 0,
+              visiblePageRect.height > 0,
+              abs(visiblePageRect.width - pageRect.width) < 1,
+              abs(visiblePageRect.height - pageRect.height) < 1,
+              let snapshotView = window.resizableSnapshotView(
+                from: windowRect,
+                afterScreenUpdates: false,
+                withCapInsets: .zero
+              ) else { return nil }
+
+        snapshotView.isUserInteractionEnabled = false
+        return HistoryOverviewTransitionSnapshot(
+            tab: selectedHistoryTab,
+            pageSize: windowRect.size,
+            contentView: snapshotView
+        )
     }
 
     private var cachedSnapshotForActiveConversation: TextConversationTransitionSnapshot? {
@@ -1123,8 +1300,13 @@ struct ContentView: View {
 
     private func showHistoryOverview() {
         dismissHomeKeyboardForHistoryOverview()
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
+        withAnimation(
+            reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35),
+            completionCriteria: .logicallyComplete
+        ) {
             isHistoryOverviewPresented = true
+        } completion: {
+            scheduleHistoryOverviewSnapshotRefresh()
         }
     }
 
@@ -1136,6 +1318,8 @@ struct ContentView: View {
     }
 
     private func hideHistoryOverview() {
+        historyOverviewSnapshotRefreshTask?.cancel()
+        historyOverviewSnapshotRefreshTask = nil
         withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
             isHistoryOverviewPresented = false
         }
@@ -1331,11 +1515,14 @@ struct ContentView: View {
                     messages: messages,
                     plantBinding: plantBinding
                 )
+                historyOverviewSnapshotRefreshTask?.cancel()
+                historyOverviewSnapshotRefreshTask = nil
                 var transaction = Transaction(animation: nil)
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
                     cachedTextConversationSnapshot = nil
                     activeTextConversationSnapshot = nil
+                    activeHistoryOverviewSnapshot = nil
                     activeTextChat = launch
                     isInitialTextChatTransitionComplete = true
                 }
@@ -1355,6 +1542,8 @@ struct ContentView: View {
         _ conversation: AIConversation,
         messages: [ChatMessage]
     ) {
+        historyOverviewSnapshotRefreshTask?.cancel()
+        historyOverviewSnapshotRefreshTask = nil
         withAnimation(pageTransitionAnimation) {
             isHistoryOverviewPresented = false
         }
@@ -1659,6 +1848,20 @@ private final class HomeDashboardTransitionSnapshot: Identifiable {
     let contentView: UIView
 
     init(pageSize: CGSize, contentView: UIView) {
+        self.pageSize = pageSize
+        self.contentView = contentView
+    }
+}
+
+@MainActor
+private final class HistoryOverviewTransitionSnapshot: Identifiable {
+    let id = UUID()
+    let tab: HistoryTab
+    let pageSize: CGSize
+    let contentView: UIView
+
+    init(tab: HistoryTab, pageSize: CGSize, contentView: UIView) {
+        self.tab = tab
         self.pageSize = pageSize
         self.contentView = contentView
     }
