@@ -436,7 +436,6 @@ struct TextConversationView: View {
     let configurationProvider: () throws -> AIConfiguration
     let onMessageFlightRequested: (MessageFlightRequest) -> Void
     let onMessageFlightCancelled: (UUID) -> Void
-    let onTransitionSnapshotInvalidated: () -> Void
     let onHome: () -> Void
 
     @State private var conversation: AIConversation?
@@ -508,7 +507,6 @@ struct TextConversationView: View {
         },
         onMessageFlightRequested: @escaping (MessageFlightRequest) -> Void,
         onMessageFlightCancelled: @escaping (UUID) -> Void,
-        onTransitionSnapshotInvalidated: @escaping () -> Void = {},
         onHome: @escaping () -> Void
     ) {
         self.database = database
@@ -528,7 +526,6 @@ struct TextConversationView: View {
         self.configurationProvider = configurationProvider
         self.onMessageFlightRequested = onMessageFlightRequested
         self.onMessageFlightCancelled = onMessageFlightCancelled
-        self.onTransitionSnapshotInvalidated = onTransitionSnapshotInvalidated
         self.onHome = onHome
         _conversation = State(initialValue: resumedConversation)
         _messages = State(initialValue: resumedMessages)
@@ -549,10 +546,7 @@ struct TextConversationView: View {
                     .padding()
                     .padding(.top)
             }
-            .trackConversationBottom(
-                $isScrolledToBottom,
-                onScrollSettled: onTransitionSnapshotInvalidated
-            )
+            .trackConversationBottom($isScrolledToBottom)
             .plantTalkBottomBar {
                 if isComposerVisible {
                     inputBar
@@ -574,9 +568,6 @@ struct TextConversationView: View {
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in
                 handleMessageCountChange(proxy: proxy)
-            }
-            .onChange(of: transitionSnapshotRevision) { _, _ in
-                onTransitionSnapshotInvalidated()
             }
             .task {
                 startInitialMessage()
@@ -658,27 +649,6 @@ struct TextConversationView: View {
         } message: {
             Text(errorMessage ?? "未知错误")
         }
-    }
-
-    /// A small value-semantic description of content that changes the rendered
-    /// conversation page. It avoids comparing the full transcript on every
-    /// streamed token while still invalidating a stale transition snapshot.
-    private var transitionSnapshotRevision: TextTransitionSnapshotRevision {
-        TextTransitionSnapshotRevision(
-            messageCount: messages.count,
-            lastMessageID: messages.last?.id,
-            lastMessageContentCount: messages.last?.content.count ?? 0,
-            lastMessageImageCount: messages.last?.imageAttachments.count ?? 0,
-            lastMessageToolCount: messages.last?.toolInvocations.count ?? 0,
-            streamingContentCount: streamingAssistantState.message?.content.count ?? 0,
-            pendingAttachmentCount: pendingImageAttachments.count,
-            isScrolledToBottom: isScrolledToBottom,
-            isComposerVisible: isComposerVisible,
-            isWaitingForFirstToken: isWaitingForFirstToken,
-            isAccessoryMenuExpanded: isAccessoryMenuExpanded,
-            activeMediaPanelID: activeMediaPanel?.id,
-            imagePreviewID: imagePreviewItem?.id
-        )
     }
 
     /// Keep the transcript pinned to the latest message when appropriate.
@@ -2319,7 +2289,6 @@ private struct ConversationBottomMarker: View {
 
 private struct ConversationBottomTrackingModifier: ViewModifier {
     @Binding var isAtBottom: Bool
-    let onScrollSettled: () -> Void
     @State private var legacyContentBottom: CGFloat = 0
     @State private var legacyViewportHeight: CGFloat = 0
 
@@ -2332,10 +2301,6 @@ private struct ConversationBottomTrackingModifier: ViewModifier {
                         >= geometry.contentSize.height - ConversationMotion.bottomTolerance
                 } action: { _, newValue in
                     isAtBottom = newValue
-                }
-                .onScrollPhaseChange { _, newPhase in
-                    guard newPhase == .idle else { return }
-                    onScrollSettled()
                 }
         } else {
             content
@@ -2384,33 +2349,9 @@ private struct ConversationViewportHeightPreferenceKey: PreferenceKey {
 }
 
 private extension View {
-    func trackConversationBottom(
-        _ isAtBottom: Binding<Bool>,
-        onScrollSettled: @escaping () -> Void
-    ) -> some View {
-        modifier(
-            ConversationBottomTrackingModifier(
-                isAtBottom: isAtBottom,
-                onScrollSettled: onScrollSettled
-            )
-        )
+    func trackConversationBottom(_ isAtBottom: Binding<Bool>) -> some View {
+        modifier(ConversationBottomTrackingModifier(isAtBottom: isAtBottom))
     }
-}
-
-private struct TextTransitionSnapshotRevision: Equatable {
-    let messageCount: Int
-    let lastMessageID: UUID?
-    let lastMessageContentCount: Int
-    let lastMessageImageCount: Int
-    let lastMessageToolCount: Int
-    let streamingContentCount: Int
-    let pendingAttachmentCount: Int
-    let isScrolledToBottom: Bool
-    let isComposerVisible: Bool
-    let isWaitingForFirstToken: Bool
-    let isAccessoryMenuExpanded: Bool
-    let activeMediaPanelID: ConversationMediaSource.ID?
-    let imagePreviewID: ZoomableImagePreviewItem.ID?
 }
 
 @MainActor
@@ -3251,9 +3192,15 @@ private struct SelectableMessageText: UIViewRepresentable {
             return nil
         }
 
+        context.coordinator.update(
+            textView,
+            text: text,
+            rendersMarkdown: rendersMarkdown,
+            width: proposedWidth
+        )
+
         return context.coordinator.fittedSize(
             for: textView,
-            text: text,
             proposedWidth: proposedWidth,
             rendersMarkdown: rendersMarkdown,
             usesStableWidth: usesStableWidth
@@ -3272,31 +3219,7 @@ private struct SelectableMessageText: UIViewRepresentable {
         private var renderedText: String?
         private var renderedAsMarkdown = false
         private var renderedWidth: CGFloat = 0
-        private var renderedContentSizeCategory: UIContentSizeCategory?
-        private var cachedMeasurement: CachedMeasurement?
-
-        private struct CachedMeasurement {
-            let text: String
-            let rendersMarkdown: Bool
-            let proposedWidth: CGFloat
-            let usesStableWidth: Bool
-            let contentSizeCategory: UIContentSizeCategory
-            let size: CGSize
-
-            func matches(
-                text: String,
-                rendersMarkdown: Bool,
-                proposedWidth: CGFloat,
-                usesStableWidth: Bool,
-                contentSizeCategory: UIContentSizeCategory
-            ) -> Bool {
-                self.text == text
-                    && self.rendersMarkdown == rendersMarkdown
-                    && abs(self.proposedWidth - proposedWidth) <= 0.5
-                    && self.usesStableWidth == usesStableWidth
-                    && self.contentSizeCategory == contentSizeCategory
-            }
-        }
+        private var cachedMeasurement: (width: CGFloat, size: CGSize)?
 
         func update(
             _ textView: UITextView,
@@ -3306,28 +3229,14 @@ private struct SelectableMessageText: UIViewRepresentable {
         ) {
             let normalizedWidth = width > 0 ? width : 320
             let widthChanged = abs(renderedWidth - normalizedWidth) > 0.5
-            let contentSizeCategory =
-                textView.traitCollection.preferredContentSizeCategory
-            let contentChanged = renderedText != text
-                || renderedAsMarkdown != rendersMarkdown
-                || renderedContentSizeCategory != contentSizeCategory
-            guard contentChanged
+            guard renderedText != text
+                    || renderedAsMarkdown != rendersMarkdown
                     || (rendersMarkdown && widthChanged) else { return }
 
-            // `updateUIView` receives the final fitted width, while
-            // `sizeThatFits` receives the wider proposal. Moving between those
-            // two expected widths must not discard a valid full-height
-            // measurement and force TextKit to lay out the bubble again.
-            let widthMatchesCachedResult = cachedMeasurement.map {
-                abs($0.size.width - normalizedWidth) <= 0.5
-            } ?? false
             renderedText = text
             renderedAsMarkdown = rendersMarkdown
             renderedWidth = normalizedWidth
-            renderedContentSizeCategory = contentSizeCategory
-            if contentChanged || !widthMatchesCachedResult {
-                cachedMeasurement = nil
-            }
+            cachedMeasurement = nil
             if rendersMarkdown {
                 textView.attributedText = MarkdownMessageRenderer.render(
                     text,
@@ -3343,50 +3252,26 @@ private struct SelectableMessageText: UIViewRepresentable {
 
         func fittedSize(
             for textView: UITextView,
-            text: String,
             proposedWidth: CGFloat,
             rendersMarkdown: Bool,
             usesStableWidth: Bool
         ) -> CGSize {
-            let contentSizeCategory =
-                textView.traitCollection.preferredContentSizeCategory
             if let cachedMeasurement,
-               cachedMeasurement.matches(
-                    text: text,
-                    rendersMarkdown: rendersMarkdown,
-                    proposedWidth: proposedWidth,
-                    usesStableWidth: usesStableWidth,
-                    contentSizeCategory: contentSizeCategory
-               ) {
+               abs(cachedMeasurement.width - proposedWidth) <= 0.5 {
                 return cachedMeasurement.size
             }
 
-            update(
-                textView,
-                text: text,
-                rendersMarkdown: rendersMarkdown,
-                width: proposedWidth
+            let textBounds = textView.attributedText.boundingRect(
+                with: CGSize(
+                    width: proposedWidth,
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
             )
-
-            let fittedWidth: CGFloat
-            if usesStableWidth {
-                // Long/streaming assistant messages already occupy the full
-                // proposal. Avoid an otherwise redundant CoreText pass.
-                fittedWidth = proposedWidth
-            } else {
-                let textBounds = textView.attributedText.boundingRect(
-                    with: CGSize(
-                        width: proposedWidth,
-                        height: CGFloat.greatestFiniteMagnitude
-                    ),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    context: nil
-                )
-                fittedWidth = min(
-                    proposedWidth,
-                    max(ceil(textBounds.width), 1)
-                )
-            }
+            let fittedWidth = usesStableWidth
+                ? proposedWidth
+                : min(proposedWidth, max(ceil(textBounds.width), 1))
 
             // Markdown layout (tables, tab stops) depends on the render width, so
             // re-render at the final display width *now*. Otherwise `updateUIView`
@@ -3412,16 +3297,7 @@ private struct SelectableMessageText: UIViewRepresentable {
                 width: fittedWidth,
                 height: ceil(fittedSize.height)
             )
-            // Keep the eager transcript's exact height so the scroll indicator
-            // remains stable, but reuse it for every identical layout proposal.
-            cachedMeasurement = CachedMeasurement(
-                text: text,
-                rendersMarkdown: rendersMarkdown,
-                proposedWidth: proposedWidth,
-                usesStableWidth: usesStableWidth,
-                contentSizeCategory: contentSizeCategory,
-                size: result
-            )
+            cachedMeasurement = (proposedWidth, result)
             return result
         }
 
