@@ -182,6 +182,7 @@ SemaphoreHandle_t cloudSampleMutex = nullptr;
 QueueHandle_t cloudHistoryUploadQueue = nullptr;
 TaskHandle_t cloudTaskHandle = nullptr;
 volatile uint32_t cloudSampleRequestToken = 0;
+uint32_t lastUploadedSequence = 0;  // Persistent cursor for WiFi upload resumption
 CloudSampleResult cloudLastSample = {};
 bool cloudClockSynced = false;
 bool cloudClockSyncStarted = false;
@@ -784,6 +785,10 @@ int16_t encodeTemperature(float value) {
   return static_cast<int16_t>(constrain(scaled, -32768.0f, 32767.0f));
 }
 
+float decodeTemperature(int16_t encoded) {
+  return static_cast<float>(encoded) / 100.0f;
+}
+
 #if PLANT_CLOUD_ENABLED
 void publishCloudSample(const SensorSample &sample, uint32_t sequence, uint32_t recordedAt);
 #endif
@@ -793,6 +798,10 @@ uint16_t encodeUnsignedHundredths(float value, float maximum) {
     return 0;
   }
   return static_cast<uint16_t>(roundf(constrain(value, 0.0f, maximum) * 100.0f));
+}
+
+float decodeUnsignedHundredths(uint16_t encoded) {
+  return static_cast<float>(encoded) / 100.0f;
 }
 
 bool appendHistoryRecord(const SensorSample &sample) {
@@ -1704,22 +1713,102 @@ bool uploadCloudHistorySample(const CloudSampleResult &sample) {
   return true;
 }
 
+void loadUploadCursor() {
+  lastUploadedSequence = sequencePreferences.getULong("lastUpload", 0);
+  if (lastUploadedSequence > 0) {
+    Serial.printf(
+      "CLOUD: resuming upload from sequence %lu.\n",
+      static_cast<unsigned long>(lastUploadedSequence)
+    );
+  }
+}
+
+bool saveUploadCursor(uint32_t sequence) {
+  if (sequencePreferences.putULong("lastUpload", sequence) != sizeof(uint32_t)) {
+    Serial.printf(
+      "CLOUD: WARNING: failed to persist upload cursor %lu to NVS.\n",
+      static_cast<unsigned long>(sequence)
+    );
+    return false;
+  }
+  return true;
+}
+
 bool flushPendingCloudHistory() {
   if (cloudHistoryUploadQueue == nullptr) {
     return true;
   }
 
-  // Drain a short burst after reconnecting without starving command polling.
+  // First, drain any remaining items from the legacy RAM queue (for backward compatibility
+  // during the transition period, or if the cursor is somehow behind queued items).
   for (uint8_t attempt = 0; attempt < 4; ++attempt) {
     CloudSampleResult pending = {};
     if (xQueuePeek(cloudHistoryUploadQueue, &pending, 0) != pdTRUE) {
-      return true;
+      break;  // Queue empty, proceed to LittleFS scan
     }
     if (!uploadCloudHistorySample(pending)) {
       return false;
     }
     xQueueReceive(cloudHistoryUploadQueue, &pending, 0);
+    lastUploadedSequence = pending.sequence;
+    saveUploadCursor(lastUploadedSequence);
   }
+
+  // Now backfill from LittleFS: find records with sequence > lastUploadedSequence.
+  // Upload a small batch per cycle to avoid starving command polling.
+  if (!historyStorageReady || historyCount == 0 || newestSequence <= lastUploadedSequence) {
+    return true;  // Nothing to backfill
+  }
+
+  File file = LittleFS.open(HISTORY_FILE_PATH, "r");
+  if (!file) {
+    Serial.println("CLOUD: cannot open history file for backfill.");
+    return false;
+  }
+
+  uint8_t packet[HISTORY_PACKET_SIZE] = {};
+  uint8_t uploaded = 0;
+  const uint8_t maxPerCycle = 4;
+
+  // Never scan from sequence 1 when NVS has no cursor but LittleFS contains
+  // epoch-sized sequence values. The ring buffer cannot contain anything older
+  // than oldestSequence, so beginning there avoids billions of empty reads.
+  const uint32_t firstPendingSequence = max(
+    lastUploadedSequence + 1,
+    oldestSequence
+  );
+
+  // The ring buffer may have gaps or wrap-around, so try each sequence that can
+  // still be represented by the retained LittleFS window.
+  for (uint32_t seq = firstPendingSequence; seq <= newestSequence && uploaded < maxPerCycle; ++seq) {
+    if (!readHistoryRecord(file, seq, packet)) {
+      // This slot might be empty (ring buffer wrapped), or the record is invalid. Skip.
+      continue;
+    }
+
+    // Reconstruct CloudSampleResult from the stored packet
+    CloudSampleResult sample = {};
+    sample.token = 0;  // Not used for history backfill
+    sample.sequence = readUInt32LE(packet + 4);
+    sample.recordedAt = readUInt32LE(packet + 8);
+    sample.soilRaw = readUInt16LE(packet + 12);
+    sample.temperature = decodeTemperature(static_cast<int16_t>(readUInt16LE(packet + 14)));
+    sample.humidity = decodeUnsignedHundredths(readUInt16LE(packet + 16));
+    sample.lightLux = static_cast<float>(readUInt16LE(packet + 18));
+    sample.flags = packet[2];
+    sample.stored = true;
+
+    if (!uploadCloudHistorySample(sample)) {
+      file.close();
+      return false;  // Upload failed, retry next cycle
+    }
+
+    lastUploadedSequence = sample.sequence;
+    saveUploadCursor(lastUploadedSequence);
+    ++uploaded;
+  }
+
+  file.close();
   return true;
 }
 
@@ -1794,6 +1883,45 @@ void cloudTask(void *) {
   // Let BLE finish advertising and the first sample settle before bringing the
   // second radio up.
   vTaskDelay(pdMS_TO_TICKS(5000));
+
+  // Load the upload cursor from NVS to resume from the last successful upload.
+  loadUploadCursor();
+
+  // Sync nextSequence with cloud to handle LittleFS ring buffer wrap-around.
+  // If the ring buffer has overwritten newer data, LittleFS scan will report
+  // an old newestSequence. Query the cloud to get the true latest sequence.
+  if (ensureWiFiConnected()) {
+    String url = cloudEndpoint("/sync/last_sequence");
+    url += "?deviceId=";
+    url += PLANT_CLOUD_DEVICE_ID;
+    String response;
+    if (cloudRequest("GET", url, String(), &response) == 200) {
+      const int startPos = response.indexOf("\"lastSequence\":");
+      if (startPos >= 0) {
+        const int numStart = startPos + 15;
+        const int numEnd = response.indexOf(',', numStart);
+        const String seqStr = response.substring(numStart, numEnd > 0 ? numEnd : response.length());
+        const uint32_t cloudLastSeq = static_cast<uint32_t>(seqStr.toInt());
+
+        if (cloudLastSeq > lastUploadedSequence) {
+          // The cloud cursor is authoritative for already accepted readings.
+          // Persist it so a fresh NVS state does not resend old LittleFS data.
+          lastUploadedSequence = cloudLastSeq;
+          saveUploadCursor(lastUploadedSequence);
+        }
+
+        if (cloudLastSeq > 0 && cloudLastSeq >= nextSequence) {
+          // Cloud has newer data. Advance only the allocation cursor; keep
+          // newestSequence describing records that actually exist in LittleFS.
+          nextSequence = cloudLastSeq + 1;
+          Serial.printf(
+            "CLOUD: adjusted nextSequence to %lu based on cloud state.\n",
+            static_cast<unsigned long>(nextSequence)
+          );
+        }
+      }
+    }
+  }
 
   for (;;) {
     // BLE is an intentionally exclusive local maintenance channel. Remote

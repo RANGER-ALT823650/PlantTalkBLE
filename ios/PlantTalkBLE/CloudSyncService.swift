@@ -14,6 +14,12 @@ final class CloudSyncService: ObservableObject {
 
     private init() {}
 
+    /// 上次上传到云端的最大 sequence，用于增量同步
+    private var lastSyncedSequence: Int64 {
+        get { UserDefaults.standard.object(forKey: "lastSyncedSequence") as? Int64 ?? 0 }
+        set { UserDefaults.standard.set(newValue, forKey: "lastSyncedSequence") }
+    }
+
     struct SyncPushRequest: Encodable {
         struct ConvDTO: Encodable {
             let id: String
@@ -172,8 +178,8 @@ final class CloudSyncService: ObservableObject {
 
             // 读不出本地读数是真实故障，不能用 try? 咽掉：那样摘要会显示
             // "上传 0 条读数"，看起来像没有数据而不是同步出了问题。
-            // 只发云端还没有的那些：整表重传会让"上传 1067 条"每次都出现。
-            let localReadings = try await database.allSensorReadingsForSync().filter {
+            // 使用游标增量查询：只取 sequence > lastSyncedSequence 的读数
+            let localReadings = try await database.allSensorReadingsForSync(afterSequence: lastSyncedSequence).filter {
                 !pulled.readingKeys.contains("\($0.deviceId):\($0.sequence)")
             }
 
@@ -195,6 +201,11 @@ final class CloudSyncService: ObservableObject {
                     // 只有云端确实收下了墓碑才清 pending，否则下次继续重试
                     try await database.markTombstonesPushed(pendingTombstones)
                     pushedDeletions = pendingTombstones.count
+                }
+
+                // 更新上传游标：记录本次上传的最大 sequence
+                if !localReadings.isEmpty, let maxSeq = localReadings.map(\.sequence).max() {
+                    lastSyncedSequence = maxSeq
                 }
             }
 
@@ -492,6 +503,11 @@ final class CloudSyncService: ObservableObject {
         if !remoteReadings.isEmpty {
             let inserted = try await database.insertRemoteSensorReadings(remoteReadings)
             outcome.sensorReadings = inserted
+
+            // 更新游标：从云端拉取的数据也要更新本地游标
+            if let maxSeq = remoteReadings.map(\.sequence).max(), maxSeq > lastSyncedSequence {
+                lastSyncedSequence = maxSeq
+            }
         }
 
         return outcome

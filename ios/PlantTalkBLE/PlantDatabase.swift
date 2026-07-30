@@ -1004,7 +1004,7 @@ actor PlantDatabase {
         }
     }
 
-    func allSensorReadingsForSync() async throws -> [SyncSensorReading] {
+    func allSensorReadingsForSync(afterSequence: Int64 = 0) async throws -> [SyncSensorReading] {
         try await writer.read { db in
             let rows = try Row.fetchAll(
                 db,
@@ -1012,9 +1012,11 @@ actor PlantDatabase {
                     SELECT device_id, sequence, recorded_at, received_at,
                            timestamp_estimated, soil_raw, temperature, humidity, light_lux
                     FROM sensor_readings
-                    ORDER BY recorded_at ASC
+                    WHERE sequence > ?
+                    ORDER BY sequence ASC
                     LIMIT 5000
-                    """
+                    """,
+                arguments: [afterSequence]
             )
             return rows.map { row in
                 let recDate: Date = row["recorded_at"]

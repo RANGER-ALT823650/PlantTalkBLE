@@ -69,6 +69,7 @@ COMMAND_CREATE_PATHS = ('/command/create', '/commands/create')
 COMMAND_RESPOND_PATHS = ('/command/respond', '/commands/respond')
 COMMAND_POLL_PATHS = ('/command/poll', '/commands/poll')
 COMMAND_STATUS_PATHS = ('/command/status', '/commands/status')
+LAST_SEQUENCE_PATHS = ('/sync/last_sequence', '/last_sequence')
 
 
 def now_ms():
@@ -668,6 +669,41 @@ def handle_push(client, body_data):
     return result
 
 
+def handle_last_sequence(client, query_params):
+    """
+    返回指定设备的最新 sequence，供 ESP32 优化断点续传。
+    GET /sync/last_sequence?device_id=xxx
+    """
+    device_id = as_text(query_params.get('deviceId') or query_params.get('device_id') or 'default_device').strip()
+
+    # 倒序扫描 sensor_readings 表，拿第一条就是最新的
+    try:
+        start_key = [('device_id', device_id), ('sequence', INF_MAX)]
+        end_key = [('device_id', device_id), ('sequence', INF_MIN)]
+
+        # 使用内部迭代器，倒序读取
+        consumed, next_start_pk, rows, _ = client.get_range(
+            TABLE_SENSOR_READINGS,
+            Direction.BACKWARD,
+            start_key,
+            end_key,
+            max_version=1,
+            limit=1
+        )
+
+        if rows and len(rows) > 0:
+            sequence = rows[0].primary_key[1][1]
+            return {'success': True, 'lastSequence': sequence}
+
+        # 表为空或该设备无数据
+        return {'success': True, 'lastSequence': 0}
+
+    except Exception as error:
+        if is_table_missing(error):
+            return {'success': True, 'lastSequence': 0, 'warning': f"表 '{TABLE_SENSOR_READINGS}' 不存在"}
+        raise
+
+
 def handle_pull(client, query_params):
     since = as_int(query_params.get('since'), 0)
     missing_tables = set()
@@ -1211,6 +1247,8 @@ def main_logic(method, path, headers, query_params, body_data):
             return 200, cors_headers, handle_poll_command(client, query_params)
         if clean_path in COMMAND_STATUS_PATHS or 'commandId' in query_params or 'command_id' in query_params:
             return 200, cors_headers, handle_get_command_status(client, query_params)
+        if clean_path in LAST_SEQUENCE_PATHS:
+            return 200, cors_headers, handle_last_sequence(client, query_params)
 
         is_pull = (
             clean_path in ('/sync/pull', '/messages', '/pull', '', '/') or
