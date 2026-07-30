@@ -1,10 +1,16 @@
 import AVFAudio
 import Combine
 import CoreHaptics
+import os
 import SwiftUI
 import UIKit
 
 let messageFlightCoordinateSpace = "plant-talk-message-flight"
+
+let plantTalkPageTransitionSignposter = OSSignposter(
+    subsystem: "com.example.PlantTalkBLE",
+    category: .pointsOfInterest
+)
 
 /// Owns the two haptics of the realtime-voice flow:
 ///
@@ -304,6 +310,7 @@ struct ContentView: View {
                 memoryStore: memoryStore
             )
         )
+        plantTalkPageTransitionSignposter.emitEvent("TransitionTracingReady")
     }
 
     var body: some View {
@@ -348,6 +355,13 @@ struct ContentView: View {
                         horizontalPageGesture(pageWidth: geometry.size.width)
                     )
                 }
+                .modifier(
+                    InteractiveHomeDepthModifier(
+                        dragState: interactivePageDragState,
+                        transition: interactivePageTransition,
+                        pageWidth: geometry.size.width
+                    )
+                )
                 .scrollDisabled(interactivePageTransition != nil)
 
                 if let activeTextConversationSnapshot {
@@ -374,45 +388,47 @@ struct ContentView: View {
                     .zIndex(40)
                 }
 
-                if isHistoryOverviewRendered {
-                    NavigationStack {
-                        HistoryOverviewView(
-                            database: database,
-                            selectedTab: $selectedHistoryTab,
-                            onContinueTextConversation: continueTextConversation,
-                            onContinueRealtimeConversation: continueRealtimeConversation,
-                            onDetailPresentationChanged: { isPresented in
-                                isHistoryDetailPresented = isPresented
-                            },
-                            onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard,
-                            onDeleteGeneratedImage: removeGeneratedImageFromPlantCardIfNeeded
-                        )
-                            .background(Color(uiColor: .systemBackground))
-                            .toolbar {
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    Button(action: hideHistoryOverview) {
-                                        Image(systemName: "xmark")
-                                    }
-                                    .accessibilityLabel("返回")
+                // Keep History mounted one page offscreen so its NavigationStack,
+                // selected tab, database state, and List layout are already warm
+                // before the first drag frame needs to reveal them.
+                NavigationStack {
+                    HistoryOverviewView(
+                        database: database,
+                        selectedTab: $selectedHistoryTab,
+                        onContinueTextConversation: continueTextConversation,
+                        onContinueRealtimeConversation: continueRealtimeConversation,
+                        onDetailPresentationChanged: { isPresented in
+                            isHistoryDetailPresented = isPresented
+                        },
+                        onApplyGeneratedImageToPlantCard: applyGeneratedImageToPlantCard,
+                        onDeleteGeneratedImage: removeGeneratedImageFromPlantCardIfNeeded
+                    )
+                        .background(Color(uiColor: .systemBackground))
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button(action: hideHistoryOverview) {
+                                    Image(systemName: "xmark")
                                 }
+                                .accessibilityLabel("返回")
                             }
-                    }
-                    .scrollDisabled(interactivePageTransition != nil)
-                    .modifier(
-                        InteractivePageOffsetModifier(
-                            page: .history,
-                            dragState: interactivePageDragState,
-                            transition: interactivePageTransition,
-                            isPresented: isHistoryOverviewPresented,
-                            pageWidth: geometry.size.width
-                        )
-                    )
-                    .simultaneousGesture(
-                        hideHistoryGesture(pageWidth: geometry.size.width)
-                    )
-                    .transition(historyOverviewTransition)
-                    .zIndex(50)
+                        }
                 }
+                .scrollDisabled(interactivePageTransition != nil)
+                .modifier(
+                    InteractivePageOffsetModifier(
+                        page: .history,
+                        dragState: interactivePageDragState,
+                        transition: interactivePageTransition,
+                        isPresented: isHistoryOverviewPresented,
+                        pageWidth: geometry.size.width
+                    )
+                )
+                .simultaneousGesture(
+                    hideHistoryGesture(pageWidth: geometry.size.width)
+                )
+                .allowsHitTesting(isHistoryOverviewRendered)
+                .accessibilityHidden(!isHistoryOverviewRendered)
+                .zIndex(50)
             }
         }
         .onReceive(
@@ -421,6 +437,9 @@ struct ContentView: View {
             )
         ) { _ in
             isSoftwareKeyboardVisible = true
+            if isHistoryOverviewRendered {
+                dismissHomeKeyboardForHistoryOverview()
+            }
         }
         .onReceive(
             NotificationCenter.default.publisher(
@@ -454,7 +473,7 @@ struct ContentView: View {
                     realtimeConversationState: realtimeConversation.state,
                     voiceVisualDriver: realtimeConversation.voiceVisualDriver,
                     isInteractionSuppressed: isHomeDashboardInteractionSuppressed,
-                    isMotionPaused: isPageTransitionActive,
+                    isMotionPaused: isHomeMotionPaused,
                     onTextSend: startTextConversation,
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
@@ -495,6 +514,15 @@ struct ContentView: View {
                     }
                 }
 
+                InteractiveHomeDimmingLayer(
+                    dragState: interactivePageDragState,
+                    transition: interactivePageTransition,
+                    pageWidth: geometry.size.width
+                )
+                .allowsHitTesting(false)
+                .ignoresSafeArea()
+                .zIndex(1.5)
+
                 if let activeTextChat,
                    let plantBinding = activeTextChat.plantBinding {
                     TextConversationView(
@@ -522,6 +550,7 @@ struct ContentView: View {
                             beginMessageFlight(request)
                         },
                         onMessageFlightCancelled: cancelMessageFlight,
+                        onTransitionSnapshotInvalidated: invalidateTextConversationSnapshot,
                         onHome: returnToHome
                     )
                     .id(activeTextChat.id)
@@ -539,7 +568,8 @@ struct ContentView: View {
                                 ? interactivePageTransition
                                 : nil,
                             isPresented: isTextConversationPresented,
-                            pageWidth: geometry.size.width
+                            pageWidth: geometry.size.width,
+                            compensatesForHomeDepth: true
                         )
                     )
                     .opacity(activeTextConversationSnapshot == nil ? 1 : 0)
@@ -556,10 +586,6 @@ struct ContentView: View {
 
             }
         }
-    }
-
-    private var historyOverviewTransition: AnyTransition {
-        reduceMotion ? .opacity : .move(edge: .leading)
     }
 
     private func applyGeneratedImageToPlantCard(_ item: GeneratedPlantImage) {
@@ -600,6 +626,16 @@ struct ContentView: View {
         interactivePageTransition != nil || isInteractivePageSettling
     }
 
+    /// The home dashboard stays mounted underneath History and Text Conversation
+    /// so its state is preserved. Keep the orb's 30fps mesh clock paused for the
+    /// entire time that dashboard is covered, not only while the page is moving.
+    private var isHomeMotionPaused: Bool {
+        isPageTransitionActive
+            || isHistoryOverviewRendered
+            || isTextConversationPresented
+            || textConversationTransitionPhase != .idle
+    }
+
     private func horizontalPageGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged { value in
@@ -626,7 +662,7 @@ struct ContentView: View {
                       value.translation.width < 0,
                       isHorizontalSwipe(value.translation) else { return }
 
-                interactivePageTransition = .dismissingHistory
+                beginInteractivePageTransition(.dismissingHistory)
                 interactivePageDragState.translation = value.translation.width
             }
             .onEnded { value in
@@ -684,12 +720,12 @@ struct ContentView: View {
 
         if isTextConversationPresented, value.translation.width > 0 {
             activateTextConversationSnapshotForDismissal()
-            interactivePageTransition = .dismissingTextConversation
+            beginInteractivePageTransition(.dismissingTextConversation)
             interactivePageDragState.translation = value.translation.width
         } else if !isTextConversationPresented, value.translation.width > 0 {
-            isHomeTextComposerFocused = false
+            dismissHomeKeyboardForHistoryOverview()
             suppressHomeDashboardInteraction()
-            interactivePageTransition = .presentingHistory
+            beginInteractivePageTransition(.presentingHistory)
             interactivePageDragState.translation = value.translation.width
         } else if !isTextConversationPresented,
                   value.translation.width < 0,
@@ -697,7 +733,7 @@ struct ContentView: View {
             isHomeTextComposerFocused = false
             suppressHomeDashboardInteraction()
             activateCachedTextConversationSnapshot()
-            interactivePageTransition = .presentingTextConversation
+            beginInteractivePageTransition(.presentingTextConversation)
             interactivePageDragState.translation = value.translation.width
         }
     }
@@ -761,6 +797,7 @@ struct ContentView: View {
         pageWidth: CGFloat
     ) {
         if shouldPresent {
+            dismissHomeKeyboardForHistoryOverview()
             setWithoutAnimation {
                 isHistoryOverviewPresented = true
             }
@@ -857,6 +894,7 @@ struct ContentView: View {
     }
 
     private func resetInteractivePageTransition() {
+        endInteractivePageTransitionTrace()
         interactivePageTransition = nil
         interactivePageDragState.translation = 0
         isInteractivePageSettling = false
@@ -880,6 +918,7 @@ struct ContentView: View {
 
         let stuckFlightID = activeMessageFlight?.request.id
 
+        endInteractivePageTransitionTrace()
         setWithoutAnimation {
             interactivePageTransition = nil
             interactivePageDragState.translation = 0
@@ -905,17 +944,10 @@ struct ContentView: View {
     private func activateTextConversationSnapshotForDismissal() {
         textConversationSnapshotRefreshTask?.cancel()
         textConversationSnapshotRefreshTask = nil
-        let snapshot: TextConversationTransitionSnapshot?
-        if activeMessageFlight == nil {
-            snapshot = captureCurrentTextConversationSnapshot()
-                ?? cachedSnapshotForActiveConversation
-        } else {
-            snapshot = nil
-        }
+        let snapshot = activeMessageFlight == nil
+            ? cachedSnapshotForActiveConversation
+            : nil
         setWithoutAnimation {
-            if let snapshot {
-                cachedTextConversationSnapshot = snapshot
-            }
             activeTextConversationSnapshot = snapshot
         }
     }
@@ -935,6 +967,22 @@ struct ContentView: View {
         setWithoutAnimation {
             cachedTextConversationSnapshot = snapshot
         }
+    }
+
+    /// A cached UIKit snapshot must match the latest visible transcript. Clear
+    /// stale content immediately, then rebuild only after the live page has been
+    /// idle for a short debounce. A drag never waits for this work.
+    private func invalidateTextConversationSnapshot() {
+        guard isTextConversationPresented,
+              interactivePageTransition == nil,
+              activeMessageFlight == nil else { return }
+
+        if cachedTextConversationSnapshot != nil {
+            setWithoutAnimation {
+                cachedTextConversationSnapshot = nil
+            }
+        }
+        scheduleTextConversationSnapshotRefresh()
     }
 
     private func scheduleTextConversationSnapshotRefresh() {
@@ -990,12 +1038,20 @@ struct ContentView: View {
               visiblePageRect.width > 0,
               visiblePageRect.height > 0,
               abs(visiblePageRect.width - pageRect.width) < 1,
-              abs(visiblePageRect.height - pageRect.height) < 1,
-              let snapshotView = window.resizableSnapshotView(
+              abs(visiblePageRect.height - pageRect.height) < 1 else {
+            return nil
+        }
+
+        let snapshotView = plantTalkPageTransitionSignposter.withIntervalSignpost(
+            "TextSnapshotCapture"
+        ) {
+            window.resizableSnapshotView(
                 from: windowRect,
                 afterScreenUpdates: false,
                 withCapInsets: .zero
-              ) else { return nil }
+            )
+        }
+        guard let snapshotView else { return nil }
 
         snapshotView.isUserInteractionEnabled = false
         return TextConversationTransitionSnapshot(
@@ -1040,11 +1096,47 @@ struct ContentView: View {
         abs(translation.width) > abs(translation.height) * 1.25
     }
 
+    private func beginInteractivePageTransition(
+        _ transition: InteractivePageTransition
+    ) {
+        guard interactivePageTransition == nil else { return }
+
+        if interactivePageDragState.transitionSignpostState == nil {
+            let name = transition.signpostName
+            let id = plantTalkPageTransitionSignposter.makeSignpostID()
+            let state = plantTalkPageTransitionSignposter.beginInterval(
+                name,
+                id: id
+            )
+            interactivePageDragState.transitionSignpostState =
+                PageTransitionSignpostState(name: name, state: state)
+        }
+        interactivePageTransition = transition
+    }
+
+    private func endInteractivePageTransitionTrace() {
+        guard let state = interactivePageDragState.transitionSignpostState else {
+            return
+        }
+        plantTalkPageTransitionSignposter.endInterval(
+            state.name,
+            state.state
+        )
+        interactivePageDragState.transitionSignpostState = nil
+    }
+
     private func showHistoryOverview() {
-        isHomeTextComposerFocused = false
+        dismissHomeKeyboardForHistoryOverview()
         withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
             isHistoryOverviewPresented = true
         }
+    }
+
+    private func dismissHomeKeyboardForHistoryOverview() {
+        setWithoutAnimation {
+            isHomeTextComposerFocused = false
+        }
+        dismissSoftwareKeyboard()
     }
 
     private func hideHistoryOverview() {
@@ -1449,16 +1541,144 @@ private enum InteractivePageTransition {
     case dismissingHistory
     case presentingTextConversation
     case dismissingTextConversation
+
+    var signpostName: StaticString {
+        switch self {
+        case .presentingHistory:
+            "PresentHistoryTransition"
+        case .dismissingHistory:
+            "DismissHistoryTransition"
+        case .presentingTextConversation:
+            "PresentTextTransition"
+        case .dismissingTextConversation:
+            "DismissTextTransition"
+        }
+    }
+}
+
+private struct PageTransitionSignpostState {
+    let name: StaticString
+    let state: OSSignpostIntervalState
 }
 
 @Observable
 private final class InteractivePageDragState {
     var translation: CGFloat = 0
+    @ObservationIgnored var transitionSignpostState: PageTransitionSignpostState?
 }
 
 private enum InteractivePageKind {
     case history
     case textConversation
+}
+
+private enum InteractiveHomeDepth {
+    static let parallaxRatio: CGFloat = 0.25
+    // 二分验证中：蒙黑层暂时不入树，本轮只验证 transformEffect 版视差。
+    // 验证完恢复 0.2。
+    static let maximumDimmingOpacity: CGFloat = 0.2
+
+    /// Signed travel of the covering page as a fraction of one page width.
+    /// Negative while History moves in from the leading edge, positive while
+    /// Text Conversation moves in from the trailing edge.
+    private static func progress(
+        transition: InteractivePageTransition?,
+        translation: CGFloat,
+        pageWidth: CGFloat
+    ) -> CGFloat {
+        guard pageWidth > 0 else { return 0 }
+
+        switch transition {
+        case .presentingHistory:
+            return clamped(translation, lowerBound: 0, upperBound: pageWidth)
+                / pageWidth
+        case .dismissingHistory:
+            return (
+                pageWidth
+                    + clamped(translation, lowerBound: -pageWidth, upperBound: 0)
+            ) / pageWidth
+        case .presentingTextConversation:
+            return clamped(translation, lowerBound: -pageWidth, upperBound: 0)
+                / pageWidth
+        case .dismissingTextConversation:
+            return (
+                -pageWidth
+                    + clamped(translation, lowerBound: 0, upperBound: pageWidth)
+            ) / pageWidth
+        case nil:
+            return 0
+        }
+    }
+
+    static func horizontalOffset(
+        transition: InteractivePageTransition?,
+        translation: CGFloat,
+        pageWidth: CGFloat
+    ) -> CGFloat {
+        progress(
+            transition: transition,
+            translation: translation,
+            pageWidth: pageWidth
+        ) * pageWidth * parallaxRatio
+    }
+
+    static func dimmingOpacity(
+        transition: InteractivePageTransition?,
+        translation: CGFloat,
+        pageWidth: CGFloat
+    ) -> CGFloat {
+        abs(
+            progress(
+                transition: transition,
+                translation: translation,
+                pageWidth: pageWidth
+            )
+        ) * maximumDimmingOpacity
+    }
+
+    private static func clamped(
+        _ value: CGFloat,
+        lowerBound: CGFloat,
+        upperBound: CGFloat
+    ) -> CGFloat {
+        min(max(value, lowerBound), upperBound)
+    }
+}
+
+/// Moves the home surface at one quarter of the foreground page's travel so
+/// History and Text Conversation read as a layer above the dashboard.
+private struct InteractiveHomeDepthModifier: ViewModifier {
+    @Bindable var dragState: InteractivePageDragState
+    let transition: InteractivePageTransition?
+    let pageWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        content.offset(
+            x: InteractiveHomeDepth.horizontalOffset(
+                transition: transition,
+                translation: dragState.translation,
+                pageWidth: pageWidth
+            )
+        )
+    }
+}
+
+/// Darkens the revealed home surface linearly with drag distance, capped at
+/// 20% opacity at a fully committed page transition.
+private struct InteractiveHomeDimmingLayer: View {
+    @Bindable var dragState: InteractivePageDragState
+    let transition: InteractivePageTransition?
+    let pageWidth: CGFloat
+
+    var body: some View {
+        Color.black.opacity(
+            InteractiveHomeDepth.dimmingOpacity(
+                transition: transition,
+                translation: dragState.translation,
+                pageWidth: pageWidth
+            )
+        )
+    }
 }
 
 /// Keeps high-frequency drag invalidation at the transform boundary instead of
@@ -1469,9 +1689,21 @@ private struct InteractivePageOffsetModifier: ViewModifier {
     let transition: InteractivePageTransition?
     let isPresented: Bool
     let pageWidth: CGFloat
+    var compensatesForHomeDepth = false
 
     func body(content: Content) -> some View {
-        content.offset(x: horizontalOffset)
+        content.offset(
+            x: horizontalOffset
+                - (
+                    compensatesForHomeDepth
+                        ? InteractiveHomeDepth.horizontalOffset(
+                            transition: transition,
+                            translation: dragState.translation,
+                            pageWidth: pageWidth
+                        )
+                        : 0
+                )
+        )
     }
 
     private var horizontalOffset: CGFloat {
@@ -2181,7 +2413,7 @@ private struct PrimaryInteractionButton: View {
                     isMotionPaused: isMotionPaused
                 )
                     .shadow(
-                        color: tint.opacity(0.25),
+                        color: isMotionPaused ? .clear : tint.opacity(0.25),
                         radius: proxy.size.width * 0.12,
                         y: proxy.size.width * 0.05
                     )
@@ -2232,6 +2464,7 @@ private struct DiffuseOrb: View {
     var accent: VoiceVisualAccent? = nil
     let isMotionReduced: Bool
     var isMotionPaused: Bool = false
+    @State private var motionClock = PausableMotionClock()
 
     var body: some View {
         TimelineView(
@@ -2240,9 +2473,10 @@ private struct DiffuseOrb: View {
                 paused: isMotionReduced || isMotionPaused
             )
         ) { timeline in
-            let time = isMotionReduced ? 0 : timeline.date.timeIntervalSinceReferenceDate
-            let phase = time * (0.34 + 0.28 * activity)
-            let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: time)
+            let wallTime = timeline.date.timeIntervalSinceReferenceDate
+            let motionTime = isMotionReduced ? 0 : motionClock.elapsed(at: wallTime)
+            let phase = motionTime * (0.34 + 0.28 * activity)
+            let accentEnvelope = isMotionReduced ? 0 : accentEnvelope(at: wallTime)
             let pulse: Double = switch accent?.kind {
             case .strongPulse:
                 accentEnvelope * (0.055 + 0.04 * (accent?.intensity ?? 0))
@@ -2277,6 +2511,23 @@ private struct DiffuseOrb: View {
             }
         }
         .accessibilityHidden(true)
+        .onAppear {
+            synchronizeMotionClock(
+                isPaused: isMotionReduced || isMotionPaused
+            )
+        }
+        .onChange(of: isMotionReduced || isMotionPaused) { _, isPaused in
+            synchronizeMotionClock(isPaused: isPaused)
+        }
+    }
+
+    private func synchronizeMotionClock(isPaused: Bool) {
+        var updatedClock = motionClock
+        updatedClock.setPaused(
+            isPaused,
+            at: Date.now.timeIntervalSinceReferenceDate
+        )
+        motionClock = updatedClock
     }
 
     @available(iOS 18.0, *)
@@ -2392,6 +2643,32 @@ private struct DiffuseOrb: View {
 
     private func point(_ x: Double, _ y: Double) -> SIMD2<Float> {
         SIMD2(Float(x), Float(y))
+    }
+}
+
+/// Tracks only time during which the orb is actually allowed to animate.
+///
+/// `TimelineView`'s paused schedule stops redraw ticks, but deriving the mesh
+/// phase from absolute time would still jump ahead when ticks resume. This
+/// clock accumulates active time instead, so the first frame after a pause is
+/// the frame immediately following the one that was frozen.
+private struct PausableMotionClock {
+    private(set) var accumulatedTime: TimeInterval = 0
+    private(set) var startedAt: TimeInterval?
+
+    func elapsed(at time: TimeInterval) -> TimeInterval {
+        guard let startedAt else { return accumulatedTime }
+        return accumulatedTime + max(0, time - startedAt)
+    }
+
+    mutating func setPaused(_ isPaused: Bool, at time: TimeInterval) {
+        if isPaused {
+            guard startedAt != nil else { return }
+            accumulatedTime = elapsed(at: time)
+            startedAt = nil
+        } else if startedAt == nil {
+            startedAt = time
+        }
     }
 }
 

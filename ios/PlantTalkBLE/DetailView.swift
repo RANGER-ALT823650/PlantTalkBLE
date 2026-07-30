@@ -1,3 +1,4 @@
+import os
 import SwiftUI
 
 struct DetailView: View {
@@ -101,6 +102,19 @@ struct DetailView: View {
     // MARK: - Data Loading
 
     private func observeTodayReadings() async {
+        var initialLoadState: OSSignpostIntervalState? =
+            plantTalkPageTransitionSignposter.beginInterval(
+                "HistoryTodayInitialLoad"
+            )
+        defer {
+            if let initialLoadState {
+                plantTalkPageTransitionSignposter.endInterval(
+                    "HistoryTodayInitialLoad",
+                    initialLoadState
+                )
+            }
+        }
+
         do {
             let observation = await database.historyReadingsObservation()
             for try await latestReadings in observation {
@@ -108,6 +122,16 @@ struct DetailView: View {
                 todayReadings = latestReadings
                 errorMessage = nil
                 isLoading = false
+                if let state = initialLoadState {
+                    plantTalkPageTransitionSignposter.endInterval(
+                        "HistoryTodayInitialLoad",
+                        state
+                    )
+                    initialLoadState = nil
+                    plantTalkPageTransitionSignposter.emitEvent(
+                        "HistoryTodayDataReady"
+                    )
+                }
             }
         } catch is CancellationError {
             // Navigation away from this screen cancels the observation normally.
@@ -118,9 +142,22 @@ struct DetailView: View {
     }
 
     private func loadSummaries() async {
+        let loadState = plantTalkPageTransitionSignposter.beginInterval(
+            "HistorySummaryLoad"
+        )
+        defer {
+            plantTalkPageTransitionSignposter.endInterval(
+                "HistorySummaryLoad",
+                loadState
+            )
+        }
+
         do {
             dailySummaries = try await database.historySummaryByDate()
             isLoading = false
+            plantTalkPageTransitionSignposter.emitEvent(
+                "HistorySummaryDataReady"
+            )
         } catch is CancellationError {
             // ignore
         } catch {
