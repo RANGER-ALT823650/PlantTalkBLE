@@ -263,6 +263,8 @@ struct ContentView: View {
     @State private var isInteractivePageSettling = false
     @State private var isHomeDashboardInteractionSuppressed = false
     @State private var homeDashboardInteractionReleaseTask: Task<Void, Never>?
+    @State private var homeDashboardSnapshotAnchor: UIView?
+    @State private var activeHomeDashboardSnapshot: HomeDashboardTransitionSnapshot?
     @State private var textConversationSnapshotAnchor: UIView?
     @State private var cachedTextConversationSnapshot: TextConversationTransitionSnapshot?
     @State private var activeTextConversationSnapshot: TextConversationTransitionSnapshot?
@@ -357,9 +359,31 @@ struct ContentView: View {
                 }
                 .scrollDisabled(interactivePageTransition != nil)
 
+                if let activeHomeDashboardSnapshot {
+                    TransitionSnapshotView(
+                        contentView: activeHomeDashboardSnapshot.contentView
+                    )
+                    .id(activeHomeDashboardSnapshot.id)
+                    .frame(
+                        width: activeHomeDashboardSnapshot.pageSize.width,
+                        height: activeHomeDashboardSnapshot.pageSize.height
+                    )
+                    .modifier(
+                        InteractiveHomeSnapshotModifier(
+                            dragState: interactivePageDragState,
+                            transition: interactivePageTransition,
+                            pageWidth: geometry.size.width
+                        )
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .zIndex(30)
+                }
+
                 if let activeTextConversationSnapshot {
-                    TextConversationSnapshotView(
-                        snapshot: activeTextConversationSnapshot
+                    TransitionSnapshotView(
+                        contentView: activeTextConversationSnapshot.contentView
                     )
                     .id(activeTextConversationSnapshot.id)
                     .frame(
@@ -469,6 +493,12 @@ struct ContentView: View {
                     onTextSend: startTextConversation,
                     onPrimaryButtonTap: handleRealtimeButtonTap
                 )
+                .background {
+                    TransitionSnapshotAnchor { anchor in
+                        guard homeDashboardSnapshotAnchor !== anchor else { return }
+                        homeDashboardSnapshotAnchor = anchor
+                    }
+                }
                 .zIndex(1)
                 .allowsHitTesting(
                     !isTextConversationPresented
@@ -537,7 +567,7 @@ struct ContentView: View {
                     )
                     .id(activeTextChat.id)
                     .background {
-                        TextConversationSnapshotAnchor { anchor in
+                        TransitionSnapshotAnchor { anchor in
                             guard textConversationSnapshotAnchor !== anchor else { return }
                             textConversationSnapshotAnchor = anchor
                         }
@@ -705,18 +735,32 @@ struct ContentView: View {
             interactivePageTransition = .dismissingTextConversation
             interactivePageDragState.translation = value.translation.width
         } else if !isTextConversationPresented, value.translation.width > 0 {
+            guard let homeSnapshot = captureHomeDashboardSnapshot() else { return }
             dismissHomeKeyboardForHistoryOverview()
             suppressHomeDashboardInteraction()
-            interactivePageTransition = .presentingHistory
-            interactivePageDragState.translation = value.translation.width
+            setWithoutAnimation {
+                activeHomeDashboardSnapshot = homeSnapshot
+                interactivePageTransition = .presentingHistory
+                interactivePageDragState.translation = value.translation.width
+            }
         } else if !isTextConversationPresented,
                   value.translation.width < 0,
                   activeTextChat != nil {
+            guard let homeSnapshot = captureHomeDashboardSnapshot(),
+                  activeMessageFlight == nil,
+                  let textSnapshot = cachedSnapshotForActiveConversation else {
+                return
+            }
             isHomeTextComposerFocused = false
             suppressHomeDashboardInteraction()
-            activateCachedTextConversationSnapshot()
-            interactivePageTransition = .presentingTextConversation
-            interactivePageDragState.translation = value.translation.width
+            textConversationSnapshotRefreshTask?.cancel()
+            textConversationSnapshotRefreshTask = nil
+            setWithoutAnimation {
+                activeHomeDashboardSnapshot = homeSnapshot
+                activeTextConversationSnapshot = textSnapshot
+                interactivePageTransition = .presentingTextConversation
+                interactivePageDragState.translation = value.translation.width
+            }
         }
     }
 
@@ -879,6 +923,7 @@ struct ContentView: View {
         interactivePageTransition = nil
         interactivePageDragState.translation = 0
         isInteractivePageSettling = false
+        activeHomeDashboardSnapshot = nil
         activeTextConversationSnapshot = nil
         releaseHomeDashboardInteractionAfterGesture()
     }
@@ -903,6 +948,7 @@ struct ContentView: View {
             interactivePageTransition = nil
             interactivePageDragState.translation = 0
             isInteractivePageSettling = false
+            activeHomeDashboardSnapshot = nil
             activeTextConversationSnapshot = nil
             isHomeDashboardInteractionSuppressed = false
             textConversationTransitionPhase = .idle
@@ -936,16 +982,6 @@ struct ContentView: View {
                 cachedTextConversationSnapshot = snapshot
             }
             activeTextConversationSnapshot = snapshot
-        }
-    }
-
-    private func activateCachedTextConversationSnapshot() {
-        textConversationSnapshotRefreshTask?.cancel()
-        textConversationSnapshotRefreshTask = nil
-        setWithoutAnimation {
-            activeTextConversationSnapshot = activeMessageFlight == nil
-                ? cachedSnapshotForActiveConversation
-                : nil
         }
     }
 
@@ -990,6 +1026,32 @@ struct ContentView: View {
             return nil
         }
         return snapshot
+    }
+
+    private func captureHomeDashboardSnapshot()
+        -> HomeDashboardTransitionSnapshot? {
+        guard !isHistoryOverviewPresented,
+              !isTextConversationPresented,
+              let anchor = homeDashboardSnapshotAnchor,
+              let window = anchor.window,
+              !anchor.bounds.isEmpty else { return nil }
+
+        let pageRect = anchor.convert(anchor.bounds, to: window)
+        let visiblePageRect = pageRect.intersection(window.bounds)
+        guard !visiblePageRect.isNull,
+              visiblePageRect.width > 0,
+              visiblePageRect.height > 0,
+              let snapshotView = window.resizableSnapshotView(
+                from: window.bounds,
+                afterScreenUpdates: false,
+                withCapInsets: .zero
+              ) else { return nil }
+
+        snapshotView.isUserInteractionEnabled = false
+        return HomeDashboardTransitionSnapshot(
+            pageSize: window.bounds.size,
+            contentView: snapshotView
+        )
     }
 
     private func captureCurrentTextConversationSnapshot()
@@ -1487,6 +1549,51 @@ private enum InteractivePageKind {
     case textConversation
 }
 
+/// Gives the outgoing home-page snapshot a quarter-speed parallax movement.
+/// The dimming layer follows the same linear drag progress and tops out at 20%.
+private struct InteractiveHomeSnapshotModifier: ViewModifier {
+    @Bindable var dragState: InteractivePageDragState
+    let transition: InteractivePageTransition?
+    let pageWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                Color.black
+                    .opacity(dimmingOpacity)
+                    .allowsHitTesting(false)
+            }
+            .offset(x: horizontalOffset)
+    }
+
+    private var horizontalOffset: CGFloat {
+        switch transition {
+        case .presentingHistory:
+            clampedTranslation / 4
+        case .presentingTextConversation:
+            clampedTranslation / 4
+        default:
+            0
+        }
+    }
+
+    private var dimmingOpacity: Double {
+        guard pageWidth > 0 else { return 0 }
+        return Double(min(1, abs(clampedTranslation) / pageWidth)) * 0.2
+    }
+
+    private var clampedTranslation: CGFloat {
+        switch transition {
+        case .presentingHistory:
+            min(max(dragState.translation, 0), pageWidth)
+        case .presentingTextConversation:
+            min(max(dragState.translation, -pageWidth), 0)
+        default:
+            0
+        }
+    }
+}
+
 /// Keeps high-frequency drag invalidation at the transform boundary instead of
 /// propagating it through ContentView and the conversation's message hierarchy.
 private struct InteractivePageOffsetModifier: ViewModifier {
@@ -1546,6 +1653,18 @@ private struct InteractivePageOffsetModifier: ViewModifier {
 }
 
 @MainActor
+private final class HomeDashboardTransitionSnapshot: Identifiable {
+    let id = UUID()
+    let pageSize: CGSize
+    let contentView: UIView
+
+    init(pageSize: CGSize, contentView: UIView) {
+        self.pageSize = pageSize
+        self.contentView = contentView
+    }
+}
+
+@MainActor
 private final class TextConversationTransitionSnapshot: Identifiable {
     let id = UUID()
     let conversationID: UUID
@@ -1559,7 +1678,7 @@ private final class TextConversationTransitionSnapshot: Identifiable {
     }
 }
 
-private struct TextConversationSnapshotAnchor: UIViewRepresentable {
+private struct TransitionSnapshotAnchor: UIViewRepresentable {
     let onResolve: @MainActor (UIView) -> Void
 
     func makeUIView(context: Context) -> UIView {
@@ -1582,24 +1701,24 @@ private struct TextConversationSnapshotAnchor: UIViewRepresentable {
     }
 }
 
-private struct TextConversationSnapshotView: UIViewRepresentable {
-    let snapshot: TextConversationTransitionSnapshot
+private struct TransitionSnapshotView: UIViewRepresentable {
+    let contentView: UIView
 
-    func makeUIView(context: Context) -> TextConversationSnapshotHostView {
-        let host = TextConversationSnapshotHostView()
-        host.install(snapshot.contentView)
+    func makeUIView(context: Context) -> TransitionSnapshotHostView {
+        let host = TransitionSnapshotHostView()
+        host.install(contentView)
         return host
     }
 
     func updateUIView(
-        _ uiView: TextConversationSnapshotHostView,
+        _ uiView: TransitionSnapshotHostView,
         context: Context
     ) {
-        uiView.install(snapshot.contentView)
+        uiView.install(contentView)
     }
 
     static func dismantleUIView(
-        _ uiView: TextConversationSnapshotHostView,
+        _ uiView: TransitionSnapshotHostView,
         coordinator: Void
     ) {
         uiView.removeSnapshot()
@@ -1607,7 +1726,7 @@ private struct TextConversationSnapshotView: UIViewRepresentable {
 }
 
 @MainActor
-private final class TextConversationSnapshotHostView: UIView {
+private final class TransitionSnapshotHostView: UIView {
     private var snapshotView: UIView?
 
     init() {
