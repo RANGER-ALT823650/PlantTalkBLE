@@ -394,6 +394,14 @@ struct ContentView: View {
                     )
                     .id(activeTextConversationSnapshot.id)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: transitionSnapshotCornerRadius(
+                                for: geometry
+                            ),
+                            style: .continuous
+                        )
+                    )
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .textConversation,
@@ -484,6 +492,14 @@ struct ContentView: View {
                     )
                     .id(activeHistoryOverviewSnapshot.id)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: transitionSnapshotCornerRadius(
+                                for: geometry
+                            ),
+                            style: .continuous
+                        )
+                    )
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .history,
@@ -1062,6 +1078,25 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func transitionSnapshotCornerRadius(
+        for proxy: GeometryProxy
+    ) -> CGFloat {
+        if #available(iOS 26, *) {
+            let insets = proxy.containerCornerInsets
+            let radius = [
+                insets.topLeading.height,
+                insets.topTrailing.height,
+                insets.bottomLeading.height,
+                insets.bottomTrailing.height
+            ].max() ?? 0
+            if radius > 0 {
+                return radius
+            }
+        }
+
+        return 55
     }
 
     private func activateTextConversationSnapshotForDismissal() {
