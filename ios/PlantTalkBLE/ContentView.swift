@@ -465,6 +465,25 @@ struct ContentView: View {
                     )
                     .opacity(activeHistoryOverviewSnapshot == nil ? 1 : 0)
                     .accessibilityHidden(activeHistoryOverviewSnapshot != nil)
+                    // On the first interactive entry there is no cached history
+                    // snapshot yet, so this live NavigationStack is the layer
+                    // that follows the finger. Give it the same device-shaped
+                    // clipping as the cached snapshot used on later entries.
+                    //
+                    // Unlike those snapshot layers, this one carries no
+                    // `ignoresSafeArea`, so its region is the safe-area rect
+                    // while the stack still paints the full window. The insets
+                    // grow the clip path back out to the window edges; note
+                    // `geometry.size + safeAreaInsets` always equals the window,
+                    // keyboard included, so the path stays correct throughout.
+                    .clipShape(
+                        OutsetRoundedRectangle(
+                            cornerRadius: transitionSnapshotCornerRadius(
+                                for: geometry
+                            ),
+                            outsets: geometry.safeAreaInsets
+                        )
+                    )
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .history,
@@ -1817,6 +1836,35 @@ private struct InteractiveHomeSnapshotModifier: ViewModifier {
 
 /// Keeps high-frequency drag invalidation at the transform boundary instead of
 /// propagating it through ContentView and the conversation's message hierarchy.
+/// A device-shaped rounded rectangle grown outward by `outsets`.
+///
+/// The live pages are laid out inside the safe-area rect, yet a
+/// `NavigationStack` paints its bar material and background across the whole
+/// window. Clipping such a layer with a plain `RoundedRectangle` would shear
+/// off those out-of-region strips along the top and bottom. Passing the
+/// window's safe-area insets in as outsets puts the clip path back on the
+/// window edges, so only the sliding leading and trailing edges get rounded.
+private struct OutsetRoundedRectangle: Shape {
+    let cornerRadius: CGFloat
+    let outsets: EdgeInsets
+
+    func path(in rect: CGRect) -> Path {
+        // Leading/trailing map to minX/maxX, matching the LTR layout this app
+        // ships in. Both are 0 in portrait, where the shearing actually shows.
+        let expanded = CGRect(
+            x: rect.minX - outsets.leading,
+            y: rect.minY - outsets.top,
+            width: rect.width + outsets.leading + outsets.trailing,
+            height: rect.height + outsets.top + outsets.bottom
+        )
+        return Path(
+            roundedRect: expanded,
+            cornerRadius: cornerRadius,
+            style: .continuous
+        )
+    }
+}
+
 private struct InteractivePageOffsetModifier: ViewModifier {
     let page: InteractivePageKind
     @Bindable var dragState: InteractivePageDragState

@@ -30,6 +30,7 @@
 		753D161E7A2A314E64517B2C /* PlantDataTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B770E1F2E97EFA5BC194D3B8 /* PlantDataTools.swift */; };
 		76A30422EC98C370886FB859 /* PlantBluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 724054EFB61F7CD12F73AA27 /* PlantBluetoothManager.swift */; };
 		7B5D40C2BEEC751E7288F985 /* RealtimeConversationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C6CB69D89C9022FA3CEC5FF /* RealtimeConversationHistoryView.swift */; };
+		7CE73D9F55846050EA0D116F /* OutsetClipProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D4AEFE7701BC44759B59D7F /* OutsetClipProbeTests.swift */; };
 		7E12548C2451BB279E1246B9 /* HistoryTransferProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14854065A165CA16028BE462 /* HistoryTransferProtocol.swift */; };
 		808EC7CEA736C9B0C18E8E57 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEFF091310D4BDE120ECE51 /* DetailView.swift */; };
 		8956429A8F3D3D39714A0C1E /* PlantRemoteSampling.swift in Sources */ = {isa = PBXBuildFile; fileRef = B276DF98B415D14C426B0C53 /* PlantRemoteSampling.swift */; };
@@ -100,6 +101,7 @@
 		8B7CD7BD3116B7DE7F9D94F2 /* OpenAICompatibleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleClient.swift; sourceTree = "<group>"; };
 		8E797336EB08ACECAC15137F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		917B8307C377A69C58E33022 /* PlantTalkBLEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantTalkBLEApp.swift; sourceTree = "<group>"; };
+		9D4AEFE7701BC44759B59D7F /* OutsetClipProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutsetClipProbeTests.swift; sourceTree = "<group>"; };
 		A1269923265BD855A2F3C999 /* CloudSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncService.swift; sourceTree = "<group>"; };
 		A4FE412F900D4B99627B2D52 /* PlantImageGenerationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlantImageGenerationClient.swift; sourceTree = "<group>"; };
 		A7CE95AF285FE0829631724B /* QwenRealtimeConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenRealtimeConversation.swift; sourceTree = "<group>"; };
@@ -205,6 +207,7 @@
 				86EBE267846352F47C8F0662 /* DeepSeekToolIntegrationTests.swift */,
 				DC1EC0AC4C5B704E792A1A3F /* HistoryTransferProtocolTests.swift */,
 				230B6B69C893EFC572E05186 /* OpenAICompatibleClientTests.swift */,
+				9D4AEFE7701BC44759B59D7F /* OutsetClipProbeTests.swift */,
 				5E721EF74498C2582B350924 /* PlantArtworkCropTests.swift */,
 				BFDCFC46D9FDB6E6DD8A9ABA /* PlantConversationBindingTests.swift */,
 				0BC9EC6588F21FA957130C30 /* PlantDatabaseTests.swift */,
@@ -442,6 +445,7 @@
 				A6F5F7E70318133410C6A650 /* DeepSeekToolIntegrationTests.swift in Sources */,
 				BC7182B5EDC20C1864582396 /* HistoryTransferProtocolTests.swift in Sources */,
 				527F5A12260177CF1C616599 /* OpenAICompatibleClientTests.swift in Sources */,
+				7CE73D9F55846050EA0D116F /* OutsetClipProbeTests.swift in Sources */,
 				C73A929F85876992944F91A3 /* PlantArtworkCropTests.swift in Sources */,
 				4394C6727D115B590FF2A08E /* PlantConversationBindingTests.swift in Sources */,
 				C756635B10D1D60457FCCBEA /* PlantDatabaseTests.swift in Sources */,
