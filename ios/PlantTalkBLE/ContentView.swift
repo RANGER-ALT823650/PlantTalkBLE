@@ -368,10 +368,13 @@ struct ContentView: View {
                         contentView: activeHomeDashboardSnapshot.contentView
                     )
                     .id(activeHomeDashboardSnapshot.id)
-                    .frame(
-                        width: activeHomeDashboardSnapshot.pageSize.width,
-                        height: activeHomeDashboardSnapshot.pageSize.height
-                    )
+                    // Must stay flexible rather than pinned to `pageSize`. A
+                    // fixed window-sized frame reports 852pt back to this ZStack,
+                    // whose own region is only the safe-area rect; the ZStack then
+                    // re-proposes the inflated height to its flexible page layers,
+                    // pushing their bottom edge below the screen. `ignoresSafeArea`
+                    // below already stretches this layer to the full window.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .modifier(
                         InteractiveHomeSnapshotModifier(
                             dragState: interactivePageDragState,
@@ -390,10 +393,7 @@ struct ContentView: View {
                         contentView: activeTextConversationSnapshot.contentView
                     )
                     .id(activeTextConversationSnapshot.id)
-                    .frame(
-                        width: activeTextConversationSnapshot.pageSize.width,
-                        height: activeTextConversationSnapshot.pageSize.height
-                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .textConversation,
@@ -483,10 +483,7 @@ struct ContentView: View {
                         contentView: activeHistoryOverviewSnapshot.contentView
                     )
                     .id(activeHistoryOverviewSnapshot.id)
-                    .frame(
-                        width: activeHistoryOverviewSnapshot.pageSize.width,
-                        height: activeHistoryOverviewSnapshot.pageSize.height
-                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .modifier(
                         InteractivePageOffsetModifier(
                             page: .history,
