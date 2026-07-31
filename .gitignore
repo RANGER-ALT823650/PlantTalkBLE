@@ -10,8 +10,16 @@ web/
 **/xcuserdata/
 *.xcuserstate
 
-# 固件里的 Wi-Fi 凭据与云端 token（模板见 CloudConfig.example.h）
 firmware/PlantSensorBLE/CloudConfig.h
+
+# Local temporary / scratch documentation & script files
+Software build preference.md
+deepseek-tool-calling-simulation.md
+make_minimax_voiceover.py
+mesh_viz.html
+orb-playground.html
+鸿蒙移植提示词.md
+
 
 
 
