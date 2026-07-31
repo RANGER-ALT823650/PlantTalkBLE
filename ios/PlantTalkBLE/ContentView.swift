@@ -362,6 +362,19 @@ struct ContentView: View {
                     )
                 }
                 .scrollDisabled(interactivePageTransition != nil)
+                // The outgoing history page is a sibling of this stack in the
+                // outer ZStack, so the reveal can move the whole stack here —
+                // navigation bar included, matching the window snapshot the
+                // presenting side parallaxes. The conversation page cannot use
+                // this attachment point because it lives *inside* the stack.
+                .modifier(
+                    InteractiveHomeRevealModifier(
+                        page: .history,
+                        dragState: interactivePageDragState,
+                        transition: interactivePageTransition,
+                        pageWidth: geometry.size.width
+                    )
+                )
 
                 if let activeHomeDashboardSnapshot {
                     TransitionSnapshotView(
@@ -625,6 +638,19 @@ struct ContentView: View {
                         }
                     }
                 }
+
+                // Attached to the dashboard alone rather than to the enclosing
+                // stack: the outgoing conversation page is a sibling in this
+                // same ZStack and carries its own offset, so moving the stack
+                // would displace it twice.
+                .modifier(
+                    InteractiveHomeRevealModifier(
+                        page: .textConversation,
+                        dragState: interactivePageDragState,
+                        transition: interactivePageTransition,
+                        pageWidth: geometry.size.width
+                    )
+                )
 
                 if let activeTextChat,
                    let plantBinding = activeTextChat.plantBinding {
@@ -1831,6 +1857,76 @@ private struct InteractiveHomeSnapshotModifier: ViewModifier {
         default:
             0
         }
+    }
+}
+
+/// The dismissal counterpart of `InteractiveHomeSnapshotModifier`: runs that
+/// parallax-and-dim ramp backwards, so swiping a page away mirrors its entry.
+///
+/// Unlike the presenting side this drives the *live* home instead of a
+/// snapshot, because a dismissal has nothing to snapshot from. The outgoing
+/// page owns the window when the gesture starts, so a fresh capture would
+/// return that page rather than the home, and a snapshot cached during the
+/// entry can be stale by the time the user swipes back — the history page can
+/// replace the plant card artwork while it is up. Driving the real view is
+/// affordable here because `isPageTransitionActive` already parks the orb's
+/// 30fps timeline, so nothing behind the moving page is animating.
+///
+/// `page` selects which dismissal this instance responds to; the two are
+/// attached at different depths in the hierarchy (see the call sites).
+private struct InteractiveHomeRevealModifier: ViewModifier {
+    let page: InteractivePageKind
+    @Bindable var dragState: InteractivePageDragState
+    let transition: InteractivePageTransition?
+    let pageWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                Color.black
+                    .opacity(dimmingOpacity)
+                    // The home is laid out in the safe-area rect while it paints
+                    // to the window edges, so a plain overlay would leave an
+                    // undimmed strip under the status bar and home indicator.
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            .offset(x: horizontalOffset)
+    }
+
+    /// How much of the outgoing page's exit is still ahead, as a 1...0 fraction.
+    /// Starts at 1 — where the presentation left the home displaced and dimmed —
+    /// and reaches 0 as the page clears the screen and the home settles back.
+    private var remainingProgress: CGFloat {
+        guard pageWidth > 0 else { return 0 }
+        switch (page, transition) {
+        case (.history, .dismissingHistory):
+            let translation = min(max(dragState.translation, -pageWidth), 0)
+            return (pageWidth + translation) / pageWidth
+        case (.textConversation, .dismissingTextConversation):
+            let translation = min(max(dragState.translation, 0), pageWidth)
+            return (pageWidth - translation) / pageWidth
+        default:
+            return 0
+        }
+    }
+
+    /// Signs mirror the presenting parallax: history comes in from the leading
+    /// edge and holds the home pushed right, the conversation comes in from the
+    /// trailing edge and holds it pulled left. Quarter speed keeps the
+    /// displacement small enough that the outgoing page still covers the strip
+    /// the home vacates.
+    private var horizontalOffset: CGFloat {
+        switch page {
+        case .history:
+            return pageWidth / 4 * remainingProgress
+        case .textConversation:
+            return -pageWidth / 4 * remainingProgress
+        }
+    }
+
+    private var dimmingOpacity: Double {
+        Double(remainingProgress) * 0.2
     }
 }
 
