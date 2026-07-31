@@ -815,6 +815,7 @@ struct ContentView: View {
                     interactivePageTransition = .dismissingHistory
                     interactivePageDragState.translation = value.translation.width
                 }
+                triggerHorizontalPageTransitionHaptic()
             }
             .onEnded { value in
                 guard interactivePageTransition == .dismissingHistory else { return }
@@ -873,6 +874,7 @@ struct ContentView: View {
             activateTextConversationSnapshotForDismissal()
             interactivePageTransition = .dismissingTextConversation
             interactivePageDragState.translation = value.translation.width
+            triggerHorizontalPageTransitionHaptic()
         } else if !isTextConversationPresented, value.translation.width > 0 {
             guard let homeSnapshot = captureHomeDashboardSnapshot() else { return }
             // The history page is not mounted yet at this point, so its snapshot
@@ -890,6 +892,7 @@ struct ContentView: View {
                 interactivePageTransition = .presentingHistory
                 interactivePageDragState.translation = value.translation.width
             }
+            triggerHorizontalPageTransitionHaptic()
         } else if !isTextConversationPresented,
                   value.translation.width < 0,
                   activeTextChat != nil {
@@ -908,7 +911,13 @@ struct ContentView: View {
                 interactivePageTransition = .presentingTextConversation
                 interactivePageDragState.translation = value.translation.width
             }
+            triggerHorizontalPageTransitionHaptic()
         }
+    }
+
+    private func triggerHorizontalPageTransitionHaptic() {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
     }
 
     private func finishHorizontalPageDrag(

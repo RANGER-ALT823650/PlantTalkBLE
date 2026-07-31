@@ -130,7 +130,7 @@
 2. **退场采用“定格帧”状态保持（State Preservation）**  
    退场时应避免主动重置页面组件状态（例如保持 AccessoryMenu 展开、不清理图片预览等）。将离屏页面视为后台挂起的定格快照，下次进入时无缝还原现场，保证连续、无延迟的视觉体验。
 
-## 第七部分：交互式水平翻页排障结论（2026-07-22）
+## 第七部分：交互式水平翻页与转场动画排障结论（2026-07-22 ~ 2026-07-31）
 
 1. **用单一状态机接管手势**
    水平意图确认后锁定方向；拖动阶段只更新一个水平位移，结束时再按距离与速度决定完成或回弹，避免多个状态或动画同时改位置。
@@ -143,3 +143,23 @@
 
 4. **结算后原子恢复实时页面**
    完成、取消或生命周期中断时，一次性提交最终页面、移除快照、清零位移并恢复动画、滚动和点击。回归测试至少覆盖进入、返回、取消、甩动、前后台切换、边缘完整性和误触。
+
+5. **全屏快照与转场图层使用弹性 `.infinity` 约束**  
+   全屏转场快照/图层禁止写死固定像素宽高（如 `pageSize` 宽高）。在 `ZStack` 局部容器中，固定尺寸会向父容器上报膨胀的尺寸，导致 `ZStack` 将膨胀高度重新分配给子层，使视图底部被推入安全区之外。应统一使用 `.frame(maxWidth: .infinity, maxHeight: .infinity)` 结合 `.ignoresSafeArea()`，确保在精准铺满窗口的同时不干扰父级容器的布局测算。
+
+6. **动态获取硬件圆角匹配系统原生转场质感**  
+   转场快照与滑动页面须进行圆角裁切以符合 iOS 系统转场风格。iOS 26+ 优先通过 `GeometryProxy` 的 `containerCornerInsets` 动态获取设备屏幕硬件圆角（取四周最大值），旧版本系统降级使用固定基准圆角（如 55pt），并通过 `.clipShape(RoundedRectangle(cornerRadius: ..., style: .continuous))` 保持边角平滑连续。
+
+7. **使用 Outset 扩边裁切（OutsetRoundedRectangle）防止安全区超绘被撕裂**  
+   实时 View 在顶部状态栏和底部 Home Indicator 区域通常存在超绘（Overdraw）。若直接使用常规 `RoundedRectangle` 进行转场裁切，会以 View 的 layout bounds 为界，切断上下安全区超绘，导致水平滑动时顶部和底部边缘出现横向断层。解决方案是自定义 `OutsetRoundedRectangle: Shape`，将顶部和底部的 Path 坐标向外延伸 safe-area insets 的距离（`rect.inset(by: -outsets)`），把上下裁切线推至屏幕物理边界之外，仅保留左右滑动侧边的圆角裁切，完美保护上下安全区渲染的完整性。
+
+8. **退场（Dismissal）驱动 Live View 配合层级感知挂载 Modifier**  
+   进场（Presenting）使用初始捕获的页面快照做视差平移；而退场（Dismissal）由于无法预测离开前的页面状态更新（如历史页在停留期间替换了卡片插画），应直接驱动实时 Live View 运行视差与渐暗。由于手势转场期间高频动画（如 30fps Orb）已被冻结，驱动 Live View 的性能开销完全可控。同时，Reveal Modifier 的挂载位置必须感知视图树层级：
+   - 外部同级页面（如 History）：将 `InteractiveHomeRevealModifier` 挂载在主 NavigationStack 外层，退场时导航栏与背景整体平移视差；
+   - 内部嵌套页面（如 Text Conversation）：仅挂载在 Dashboard 视图本身，避免因内层页面自带 offset 而导致外层 Stack 重复叠加位移（Double displacement）。
+
+9. **全屏 Overlay 暗色遮罩须显式声明 `.ignoresSafeArea()`**  
+   转场平移伴随的背景暗色遮罩（Dimming Overlay）必须加上 `.ignoresSafeArea()`。因为主页面视图在 Safe Area 矩形内布局，若遮罩未忽略安全区，会在顶部状态栏和底部区域留下未被遮罩覆盖的亮色缝隙。
+
+10. **通过像素级 Unit Test 验证几何图形裁切逻辑**  
+    对 `OutsetRoundedRectangle` 这类涉及边界 Geometry 扩展的视效逻辑，应编写基于 `UIHostingController` 与 `UIGraphicsImageRenderer` 的像素级色彩采样单元测试（通过检测超绘区域坐标点的 Color），在自动化测试中客观验证常规 Clip 与 Outset Clip 的渲染行为差异，杜绝视觉断层回归。
