@@ -1385,14 +1385,50 @@ struct ContentView: View {
     }
 
     private func showHistoryOverview() {
-        dismissHomeKeyboardForHistoryOverview()
-        withAnimation(
-            reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35),
-            completionCriteria: .logicallyComplete
-        ) {
+        guard !isHistoryOverviewPresented,
+              interactivePageTransition == nil,
+              !isInteractivePageSettling else { return }
+
+        guard let homeSnapshot = captureHomeDashboardSnapshot(),
+              let anchor = homeDashboardSnapshotAnchor ?? historyOverviewSnapshotAnchor,
+              let window = anchor.window else {
+            // 降级方案：无法捕获快照时直接切换
+            dismissHomeKeyboardForHistoryOverview()
             isHistoryOverviewPresented = true
-        } completion: {
-            scheduleHistoryOverviewSnapshotRefresh()
+            return
+        }
+
+        let pageWidth = window.bounds.width
+        let historySnapshot = cachedSnapshotForHistoryOverview
+        historyOverviewSnapshotRefreshTask?.cancel()
+        historyOverviewSnapshotRefreshTask = nil
+        dismissHomeKeyboardForHistoryOverview()
+        suppressHomeDashboardInteraction()
+
+        // 先挂载历史页面并设置初始状态
+        setWithoutAnimation {
+            activeHomeDashboardSnapshot = homeSnapshot
+            activeHistoryOverviewSnapshot = historySnapshot
+            interactivePageTransition = .presentingHistory
+            interactivePageDragState.translation = 0
+            isHistoryOverviewPresented = true  // 立即挂载页面
+        }
+
+        triggerHorizontalPageTransitionHaptic()
+
+        // 等待一帧让视图树更新，然后开始动画
+        Task { @MainActor in
+            await Task.yield()
+            guard interactivePageTransition == .presentingHistory else { return }
+
+            isInteractivePageSettling = true
+            withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+                interactivePageDragState.translation = pageWidth
+            } completion: {
+                guard interactivePageTransition == .presentingHistory else { return }
+                resetInteractivePageTransition()
+                scheduleHistoryOverviewSnapshotRefresh()
+            }
         }
     }
 
@@ -1404,12 +1440,55 @@ struct ContentView: View {
     }
 
     private func hideHistoryOverview() {
+        guard isHistoryOverviewPresented,
+              interactivePageTransition == nil,
+              !isInteractivePageSettling else { return }
+
+        guard let anchor = historyOverviewSnapshotAnchor ?? homeDashboardSnapshotAnchor,
+              let window = anchor.window else {
+            // 降级方案：无法捕获快照时直接切换
+            historyOverviewSnapshotRefreshTask?.cancel()
+            historyOverviewSnapshotRefreshTask = nil
+            isHistoryOverviewPresented = false
+            isHistoryDetailPresented = false
+            return
+        }
+
+        let pageWidth = window.bounds.width
+        let historySnapshot = captureCurrentHistoryOverviewSnapshot()
+            ?? cachedSnapshotForHistoryOverview
         historyOverviewSnapshotRefreshTask?.cancel()
         historyOverviewSnapshotRefreshTask = nil
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.35)) {
-            isHistoryOverviewPresented = false
+
+        // 设置初始状态并保持页面挂载
+        setWithoutAnimation {
+            if let historySnapshot {
+                cachedHistoryOverviewSnapshot = historySnapshot
+            }
+            activeHistoryOverviewSnapshot = historySnapshot
+            interactivePageTransition = .dismissingHistory
+            interactivePageDragState.translation = 0
         }
-        isHistoryDetailPresented = false
+
+        triggerHorizontalPageTransitionHaptic()
+
+        // 等待一帧让视图树更新，然后开始动画
+        Task { @MainActor in
+            await Task.yield()
+            guard interactivePageTransition == .dismissingHistory else { return }
+
+            isInteractivePageSettling = true
+            withAnimation(interactivePageSettleAnimation, completionCriteria: .logicallyComplete) {
+                interactivePageDragState.translation = -pageWidth
+            } completion: {
+                guard interactivePageTransition == .dismissingHistory else { return }
+                setWithoutAnimation {
+                    isHistoryOverviewPresented = false
+                    isHistoryDetailPresented = false
+                }
+                resetInteractivePageTransition()
+            }
+        }
     }
 
     private var bluetoothSymbol: String {
