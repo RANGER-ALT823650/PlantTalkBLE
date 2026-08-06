@@ -23,6 +23,9 @@ orb-playground.html
 # Arduino test sketches
 sketch_jul3a/
 
+# HarmonyOS移植工程
+harmony/PlantTalk/
+
 
 
 
