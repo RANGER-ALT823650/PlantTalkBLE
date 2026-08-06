@@ -1,3 +1,33 @@
+# 🌿 Plant Talk BLE (`codex/no_cloud` Branch - 纯离线本地优先 & OLED 桌显抢占版)
+
+> **项目一句话简介**：Plant Talk BLE 的纯离线/本地优先版本。剔除云端中间件与网络同步依赖，引入具有最高抢占优先级的 ESP32-C3 OLED 硬件桌显，实现端间强隔离与极致隐私。
+
+---
+
+## ⚡ 项目核心亮点与特性（一目了然）
+
+* 🔒 **纯离线 & 本地优先（Local-First）**：彻底剔除阿里云 Tablestore / FC 等云同步依赖。iOS 使用本地 SQLite，Web 使用本地 IndexedDB，主 ESP32 存储于 LittleFS。三端隔离，数据不出本地，保障极致隐私。
+* 🖥️ **ESP32-C3 抢占式 OLED 桌显**：新增 ESP32-C3 + SH1106 OLED 硬件显示端。硬件桌显拥有**最高连接优先级**，C3 一通电主 ESP32 自动强行挂断 iOS/Web 并优先为 C3 推送实时画面。
+* 📡 **单连接排他性硬件协议**：主 ESP32 任意时刻仅允许一个数据客户端连接，显示器断电时允许 iOS 或 Web 动态连接读取历史与实时传感器数据。
+* 🤖 **BYOK 本地大模型直连**：仍支持本地直连 DeepSeek / OpenAI 文本 API 及千问实时语音，所有密钥存放在 Keychain，不经第三方服务器中转。
+
+---
+
+## 💡 启发式 AI Agent 提示词（复制给你的 AI 工具提问）
+
+如果你正在使用 AI Agent（如 Antigravity / Claude / Cursor / ChatGPT）阅读或分析本仓库代码，可直接复制以下 Prompt 发问：
+
+1. **去云化架构分析**：
+   > *"查看 `no_cloud_arch.md` 与代码改动，对比 `main` 分支，分析 `codex/no_cloud` 分支做出了哪些架构上的去云化与端间隔离改造？"*
+2. **OLED 桌显抢占逻辑**：
+   > *"结合 `firmware/PlantDisplayC3/PlantDisplayC3.ino` 与 `firmware/PlantSensorBLE/PlantSensorBLE.ino`，解释 ESP32-C3 OLED 显示屏上电后是如何自动被主 ESP32 识别并优先抢占 BLE 连接的？"*
+3. **数据隔离与单连接控制**：
+   > *"请分析主 ESP32 蓝牙排他性连接与 LittleFS 历史读写机制在纯离线模式下的运作流程。"*
+
+---
+
+# 📖 详细技术说明与部署指南
+
 # Plant Talk BLE Demo
 
 ESP32 每 5 分钟读取 SHT31、BH1750 和 GPIO34，将固定 20 字节历史记录写入 LittleFS 环形文件，并通过 BLE 向 SwiftUI App 提供实时读数和分批历史同步。传感器未通过初始化时，App 显示“未接入”。
