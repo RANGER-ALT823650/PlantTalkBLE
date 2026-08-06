@@ -20,6 +20,16 @@ mesh_viz.html
 orb-playground.html
 鸿蒙移植提示词.md
 
+# Arduino test sketches
+sketch_jul3a/
+
+# HarmonyOS移植工程
+harmony/PlantTalk/
+
+# Documentation & Internal Notes
+docs/
+HUMAN_ONLY/
+
 
 
 
