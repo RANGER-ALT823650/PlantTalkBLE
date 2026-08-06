@@ -1,3 +1,36 @@
+# 🌿 Plant Talk BLE (Main Branch - 云端同步与 AI 智体版)
+
+> **项目一句话简介**：连接物理世界植物传感器（ESP32）与 AI 智能体的大模型软硬件结合系统，支持多端数据同步、DeepSeek/OpenAI 环境数据 Tool Call，以及 Qwen3.5-Omni 实时语音与摄像头多模态对话。
+
+---
+
+## ⚡ 项目核心亮点与特性（一目了然）
+
+* 📡 **嵌入式硬件与可靠采集**：ESP32 定时读取温湿度（SHT31）、光照（BH1750）、土壤湿度（ADC），基于 LittleFS 实现断网环形存储与校时补发机制。
+* ☁️ **多端双向云同步**：内置 Serverless 端（FC + Tablestore），支持 iOS 与 Web 多端数据的实时上传、拉取与墓碑（Tombstone）双向删除同步。
+* 🤖 **AI 智体与环境 Tool Calling**：大模型可自主感知物理世界！内置环境数据 Tool Catalog，允许 DeepSeek / OpenAI / 千问直接查询当前的传感器实时数据与长短时历史趋势。
+* 🎙️ **Qwen3.5-Omni 实时语音与多模态**：基于 WebRTC 协议实现低延时实时语音交互、服务端 VAD 自然语音打断、拍照及 1 FPS 连续摄像头实时画面感知。
+* 🎨 **原生 SwiftUI 现代化交互**：流式 Markdown 回显、Liquid Glass 质感、自定义动画与可调参小球（Orb）视觉交互。
+
+---
+
+## 💡 启发式 AI Agent 提示词（复制给你的 AI 工具提问）
+
+如果你正在使用 AI Agent（如 Antigravity / Claude / Cursor / ChatGPT）阅读或分析本仓库代码，可直接复制以下 Prompt 发问：
+
+1. **链路架构分析**：
+   > *"请分析 PlantTalkBLE 项目中，传感器数据从 ESP32 硬件采样、LittleFS 存储，到通过 BLE 传输至 iOS App，再同步至阿里云 Tablestore 的完整数据链路与同步协议。"*
+2. **AI 工具调用机制**：
+   > *"查看 `PlantDataToolCatalog.swift` 和 `PlantDataToolExecutor.swift`，解释 iOS App 是如何定义环境数据工具并让 DeepSeek 文本模型和 Qwen3.5 实时语音模型进行 Tool Calling 的？"*
+3. **硬件通信与断点续传**：
+   > *"结合 `firmware/PlantSensorBLE/PlantSensorBLE.ino` 与 `HUMAN_ONLY/history-sync-protocol.md`，分析 ESP32 如何实现环形历史存储、蓝牙分批 ACK 确认，以及防止时间戳错乱的校时等待机制？"*
+4. **实时语音与多模态**：
+   > *"请解释 App 如何通过 WebSocket/WebRTC 发送 16kHz PCM 音频与摄像头画面，实现与阿里云 `qwen3.5-omni-flash-realtime` 的双工语音交互和打断（VAD）？"*
+
+---
+
+# 📖 详细技术说明与部署指南
+
 # Plant Talk BLE Demo
 
 ESP32 每 5 分钟读取 SHT31、BH1750 和 GPIO34，将固定 20 字节历史记录写入 LittleFS 环形文件，并通过 BLE 向 SwiftUI App 提供实时读数和分批历史同步。传感器未通过初始化时，App 显示“未接入”。
