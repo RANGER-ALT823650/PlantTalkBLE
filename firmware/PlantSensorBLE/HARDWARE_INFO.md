@@ -62,3 +62,60 @@ arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota firmware/Pla
 ESP32-D0WD-V3 的 Wi-Fi 与 BLE 共用同一个 2.4 GHz 射频。两者共存时 BLE 吞吐会
 下降,历史同步比纯 BLE 模式慢。固件已开启 modem sleep(`WiFi.setSleep(true)`)
 让共存仲裁在轮询间隙把射频交回 BLE,但下降无法完全消除。
+
+---
+
+## 5. 当前已连接 ESP32-C3 硬件信息 (2026-08-01 追加检测)
+
+*读取时间 (Read Time): 2026-08-01 19:44:00 (CST)*  
+*串口路径 (Serial Port): `/dev/cu.usbmodem101` / `/dev/tty.usbmodem101`*
+
+### 5.1 芯片基本信息
+
+| 参数项 (Parameter) | 信息/数值 (Value) |
+| :--- | :--- |
+| **芯片型号 (Chip Model)** | ESP32-C3 |
+| **封装与版本 (Package & Revision)** | ESP32-C3 AZ (QFN32) (revision v1.1) |
+| **MAC 地址 (MAC Address)** | `44:B1:76:1A:37:B4` |
+| **晶振频率 (Crystal Frequency)** | 40 MHz |
+| **支持特性 (Features)** | Wi-Fi (2.4 GHz), BLE (Bluetooth Low Energy), Embedded Flash |
+
+### 5.2 Flash 存储信息
+
+| 参数项 (Parameter) | 信息/数值 (Value) |
+| :--- | :--- |
+| **Flash 容量 (Flash Size)** | 4 MB (32 Mbit) |
+| **Flash 厂商 ID (Manufacturer ID)** | `0x46` (XMC / 武汉新芯) |
+| **Flash 设备 ID (Device ID)** | `0x4016` |
+
+### 5.3 安全配置状态
+
+| 参数项 (Parameter) | 状态 (Status) |
+| :--- | :--- |
+| **安全启动 (Secure Boot)** | 禁用 (Disabled) |
+| **Flash 加密 (Flash Encryption)** | 禁用 (Disabled) |
+| **SPI Boot Crypt Count** | `0x0` |
+
+### 5.4 USB 接口与识别信息
+
+| 参数项 (Parameter) | 信息/数值 (Value) |
+| :--- | :--- |
+| **USB 厂商 (Vendor Name)** | Espressif |
+| **USB 设备名称 (Product Name)** | USB JTAG/serial debug unit |
+| **Vendor ID (VID)** | `0x303A` (12346) |
+| **Product ID (PID)** | `0x1001` (4097) |
+| **USB 序列号 (Serial Number)** | `44:B1:76:1A:37:B4` |
+| **传输速率 (USB Speed)** | Full Speed (12 Mbps) |
+
+### 5.5 读取工具与测试指令
+
+```bash
+# 1. 检查串口端口
+ls -l /dev/cu.usbmodem*
+
+# 2. 读取芯片 Flash 与 MAC 信息
+python3 -m esptool --port /dev/cu.usbmodem101 flash_id
+
+# 3. 读取安全配置
+python3 -m esptool --port /dev/cu.usbmodem101 get_security_info
+```

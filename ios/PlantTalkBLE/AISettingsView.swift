@@ -695,6 +695,7 @@ struct AISettingsView: View {
 
 struct CloudSyncSettingsView: View {
     let database: PlantDatabase
+    @AppStorage(CloudSyncPreferences.enabledDefaultsKey) private var syncEnabled = false
     @AppStorage("plant_talk_cloud_sync_url") private var syncURL: String = ""
     @AppStorage("plant_talk_cloud_sync_token") private var syncToken: String = ""
     @AppStorage(PlantRemoteSampling.deviceIDDefaultsKey) private var remoteDeviceID: String = ""
@@ -702,6 +703,15 @@ struct CloudSyncSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Toggle("云同步", isOn: $syncEnabled)
+                    .accessibilityHint("关闭后，iOS 只使用本机独立数据库，不会发起云端同步或远程采样请求。")
+            } footer: {
+                Text(syncEnabled
+                     ? "已开启。iOS 会按下方配置与云端交换数据。"
+                     : "已关闭。iOS 数据只保存在本机的独立数据库中，与 Web 端互不关联。")
+            }
+
             Section {
                 TextField("https://<FC域名>.fcapp.run", text: $syncURL)
                     .autocorrectionDisabled()
@@ -711,6 +721,7 @@ struct CloudSyncSettingsView: View {
             } footer: {
                 Text("在函数计算 FC 3.0 控制台的【触发器管理】中复制 HTTP 触发器的公网 URL。")
             }
+            .disabled(!syncEnabled)
 
             Section {
                 SecureField("鉴权密钥 (x-auth-token)", text: $syncToken)
@@ -719,6 +730,7 @@ struct CloudSyncSettingsView: View {
             } footer: {
                 Text("云端已强制校验 AUTH_TOKEN。请填写与 FC 环境变量 AUTH_TOKEN 完全一致的值，否则所有同步请求都会被拒绝。")
             }
+            .disabled(!syncEnabled)
 
             Section {
                 TextField(PlantRemoteSampling.fallbackDeviceID, text: $remoteDeviceID)
@@ -732,6 +744,7 @@ struct CloudSyncSettingsView: View {
                 // 同一个字符串，否则指令投给了一个设备、硬件在另一个设备名下轮询。
                 Text("必须与 ESP32 固件 CloudConfig.h 里的 PLANT_CLOUD_DEVICE_ID 完全一致，远程采样才能送达。留空则使用 \(PlantRemoteSampling.fallbackDeviceID)。")
             }
+            .disabled(!syncEnabled)
 
             Section {
                 Button {
@@ -747,7 +760,7 @@ struct CloudSyncSettingsView: View {
                         }
                     }
                 }
-                .disabled(syncURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncService.isSyncing)
+                .disabled(!syncEnabled || syncURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncService.isSyncing)
 
                 if let lastSyncedAt = syncService.lastSyncedAt {
                     VStack(alignment: .leading, spacing: 4) {
@@ -778,6 +791,7 @@ struct CloudSyncSettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            .disabled(!syncEnabled)
         }
         .navigationTitle("云同步设置")
         .navigationBarTitleDisplayMode(.inline)

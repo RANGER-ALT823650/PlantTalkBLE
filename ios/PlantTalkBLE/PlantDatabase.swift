@@ -189,7 +189,11 @@ actor PlantDatabase {
             create: true
         ).appendingPathComponent("PlantTalk", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return try PlantDatabase(path: directory.appendingPathComponent("plant-talk.sqlite").path)
+        // This branch deliberately starts from a database that has never been
+        // populated by cloud pull. Keep it beside, but separate from, the
+        // existing cloud-enabled installation so switching branches cannot
+        // merge or overwrite either data set.
+        return try PlantDatabase(path: directory.appendingPathComponent("plant-talk-no-cloud.sqlite").path)
     }
 
     /// ESP32 estimated timestamps preserve cadence but may share one incorrect

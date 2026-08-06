@@ -1,5 +1,13 @@
 import Foundation
 
+enum CloudSyncPreferences {
+    static let enabledDefaultsKey = "plant_talk_cloud_sync_enabled"
+
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: enabledDefaultsKey)
+    }
+}
+
 /// 阿里云 FC + Tablestore 对话记录同步服务 (iOS)
 @MainActor
 final class CloudSyncService: ObservableObject {
@@ -108,6 +116,12 @@ final class CloudSyncService: ObservableObject {
 
     /// 执行云端同步（先 Pull 并应用远端删除，再 Push 本地新增与删除意图）
     func sync(database: PlantDatabase) async {
+        guard CloudSyncPreferences.isEnabled() else {
+            lastError = nil
+            lastWarning = nil
+            lastSyncSummary = "云同步已关闭；数据只保存在本机独立数据库中。"
+            return
+        }
         guard let urlString = UserDefaults.standard.string(forKey: "plant_talk_cloud_sync_url"),
               !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {

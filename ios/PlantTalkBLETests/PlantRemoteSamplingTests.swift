@@ -10,6 +10,17 @@ final class PlantRemoteSamplingTests: XCTestCase {
 
     // MARK: - 配置
 
+    func testCloudSyncPreferenceDefaultsToDisabled() {
+        let defaults = UserDefaults(suiteName: "cloud-sync-default-\(UUID().uuidString)")!
+        XCTAssertFalse(CloudSyncPreferences.isEnabled(in: defaults))
+    }
+
+    func testCloudSyncPreferenceRequiresExplicitEnable() {
+        let defaults = UserDefaults(suiteName: "cloud-sync-enabled-\(UUID().uuidString)")!
+        defaults.set(true, forKey: CloudSyncPreferences.enabledDefaultsKey)
+        XCTAssertTrue(CloudSyncPreferences.isEnabled(in: defaults))
+    }
+
     private func makeDefaults(
         url: String? = "https://example.fcapp.run",
         token: String? = "token",

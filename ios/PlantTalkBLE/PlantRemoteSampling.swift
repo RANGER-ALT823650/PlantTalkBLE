@@ -29,6 +29,7 @@ enum PlantRemoteSampling {
     // MARK: - 错误
 
     enum Failure: LocalizedError {
+        case cloudSyncDisabled
         case notConfigured
         case unauthorized
         case serverUnavailable(String)
@@ -39,6 +40,8 @@ enum PlantRemoteSampling {
 
         var errorDescription: String? {
             switch self {
+            case .cloudSyncDisabled:
+                "云同步已关闭。请通过蓝牙连接主 ESP32 后再请求立即采样。"
             case .notConfigured:
                 "未配置云同步地址，无法远程采样。请在【AI 设置 → 云同步】里填写 FC 地址与密钥。"
             case .unauthorized:
@@ -178,6 +181,9 @@ enum PlantRemoteSampling {
         defaults: UserDefaults = .standard,
         session: URLSession = .shared
     ) async throws -> PlantReading {
+        guard CloudSyncPreferences.isEnabled(in: defaults) else {
+            throw Failure.cloudSyncDisabled
+        }
         guard let config = loadConfiguration(from: defaults) else {
             throw Failure.notConfigured
         }

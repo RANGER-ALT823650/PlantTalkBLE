@@ -10,19 +10,19 @@
 #include <sys/time.h>
 #include <time.h>
 
-// Wi-Fi remote sampling (cloud command mailbox) is opt-in: it only compiles when
-// CloudConfig.h exists. Without it the firmware behaves exactly as it did before
-// Wi-Fi was introduced — BLE only, no radio sharing, no network stack.
-#if __has_include("CloudConfig.h")
+// The no-cloud branch is intentionally BLE-only even if a developer has an
+// ignored CloudConfig.h beside the sketch. This keeps the main ESP32 local.
+// The OLED display has hard connection priority over iOS and Web: when its
+// advertisement appears, this board disconnects the current app/browser and
+// connects to the display itself.
+#define PLANT_CLOUD_ENABLED 0
+#if PLANT_CLOUD_ENABLED
 #include "CloudConfig.h"
-#define PLANT_CLOUD_ENABLED 1
 #include <esp_sntp.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <freertos/task.h>
-#else
-#define PLANT_CLOUD_ENABLED 0
 #endif
 
 // ---------- Hardware ----------
@@ -75,6 +75,14 @@ constexpr char DATA_CHARACTERISTIC_UUID[] = "7A1E0002-7C6D-4A8B-9E1F-2D3C4B5A600
 constexpr char CONTROL_CHARACTERISTIC_UUID[] = "7A1E0003-7C6D-4A8B-9E1F-2D3C4B5A6000";
 constexpr char HISTORY_CHARACTERISTIC_UUID[] = "7A1E0004-7C6D-4A8B-9E1F-2D3C4B5A6000";
 
+// The ESP32-C3 display is deliberately a different GATT service from the
+// phone/browser service above. It advertises this service continuously; the
+// main ESP32 scans for it and becomes the BLE central for that link.
+constexpr char DISPLAY_NAME[] = "Plant Display";
+constexpr char DISPLAY_SERVICE_UUID[] = "7A1E1001-7C6D-4A8B-9E1F-2D3C4B5A6000";
+constexpr char DISPLAY_DATA_CHARACTERISTIC_UUID[] = "7A1E1002-7C6D-4A8B-9E1F-2D3C4B5A6000";
+constexpr unsigned long DISPLAY_RETRY_DELAY_MS = 250;
+
 #if PLANT_CLOUD_ENABLED
 // ---------- Cloud command mailbox ----------
 // Poll cadence. The cloud expires an unclaimed command after 60 s, so this must
@@ -125,6 +133,9 @@ Adafruit_SHT31 sht31;
 BH1750 lightMeter;
 NimBLECharacteristic *dataCharacteristic = nullptr;
 NimBLECharacteristic *historyCharacteristic = nullptr;
+NimBLEServer *sensorServer = nullptr;
+NimBLEClient *displayClient = nullptr;
+NimBLERemoteCharacteristic *displayDataCharacteristic = nullptr;
 QueueHandle_t controlCommandQueue = nullptr;
 Preferences sequencePreferences;
 
@@ -133,8 +144,15 @@ bool bh1750Ready = false;
 const char *i2cPinTestResult = "not run";
 uint8_t lastI2CAddressFound = 0;
 volatile bool clientConnected = false;
+volatile uint16_t clientConnectionHandle = BLE_HS_CONN_HANDLE_NONE;
 volatile bool advertisingRestartPending = false;
 volatile unsigned long advertisingRestartRequestedAt = 0;
+volatile bool displayCandidateFound = false;
+volatile bool displayConnecting = false;
+volatile bool displayConnected = false;
+volatile bool displayImmediateSamplePending = false;
+NimBLEAddress displayCandidateAddress;
+unsigned long displayScanRetryAt = 0;
 bool historyStorageReady = false;
 bool clockEstimated = true;
 bool initialSamplePending = true;
@@ -984,9 +1002,25 @@ void publishLiveReading(const SensorSample &sample) {
   writeFloatLE(packet + 8, sample.humidity);
   writeFloatLE(packet + 12, sample.lightLux);
 
-  dataCharacteristic->setValue(packet, sizeof(packet));
-  if (clientConnected) {
+  if (dataCharacteristic != nullptr) {
+    dataCharacteristic->setValue(packet, sizeof(packet));
+  }
+  if (clientConnected && dataCharacteristic != nullptr) {
     dataCharacteristic->notify();
+  }
+
+  if (displayConnected && displayDataCharacteristic != nullptr) {
+    // Use a write response for the display path. This is only one 16-byte
+    // packet per sample, and the acknowledgement proves the C3 accepted it
+    // before the main ESP32 reports success.
+    if (displayDataCharacteristic->writeValue(packet, sizeof(packet), true)) {
+      Serial.println("Live reading pushed to the priority OLED display.");
+    } else {
+      Serial.println("ERROR: Could not push reading to OLED display; disconnecting stale link.");
+      if (displayClient != nullptr) {
+        displayClient->disconnect();
+      }
+    }
   }
 }
 
@@ -1203,8 +1237,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     NimBLEConnInfo &connection
   ) override {
     clientConnected = true;
+    clientConnectionHandle = connection.getConnHandle();
     advertisingRestartPending = false;
-    Serial.println("BLE client connected.");
+    Serial.println("iOS/Web BLE client connected.");
+    if (displayCandidateFound || displayConnecting || displayConnected) {
+      Serial.println("OLED display has priority; current iOS/Web client will be disconnected.");
+    }
   }
 
   void onDisconnect(
@@ -1213,17 +1251,72 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     int reason
   ) override {
     clientConnected = false;
+    clientConnectionHandle = BLE_HS_CONN_HANDLE_NONE;
     if (controlCommandQueue != nullptr) {
       xQueueReset(controlCommandQueue);
     }
     advertisingRestartRequestedAt = millis();
     advertisingRestartPending = true;
-    Serial.println("BLE client disconnected; advertising restart scheduled.");
+    Serial.println("iOS/Web BLE client disconnected; advertising restart scheduled.");
   }
 };
 
+class DisplayClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient *client) override {
+    displayConnected = true;
+    Serial.printf(
+      "Priority OLED display connected at %s.\n",
+      client->getPeerAddress().toString().c_str()
+    );
+  }
+
+  void onDisconnect(NimBLEClient *client, int reason) override {
+    displayDataCharacteristic = nullptr;
+    displayConnected = false;
+    displayConnecting = false;
+    displayCandidateFound = false;
+    displayImmediateSamplePending = false;
+    displayScanRetryAt = millis() + DISPLAY_RETRY_DELAY_MS;
+    advertisingRestartRequestedAt = millis();
+    advertisingRestartPending = true;
+    Serial.printf(
+      "Priority OLED display disconnected (reason %d); iOS/Web will become available again.\n",
+      reason
+    );
+  }
+};
+
+class DisplayScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice *advertisedDevice) override {
+    if (displayCandidateFound || displayConnecting || displayConnected) {
+      return;
+    }
+
+    const bool matchingName =
+      advertisedDevice->haveName() && advertisedDevice->getName() == DISPLAY_NAME;
+    const bool matchingService = advertisedDevice->isAdvertisingService(
+      NimBLEUUID(DISPLAY_SERVICE_UUID)
+    );
+    if (!matchingName && !matchingService) {
+      return;
+    }
+
+    displayCandidateAddress = advertisedDevice->getAddress();
+    displayCandidateFound = true;
+    NimBLEDevice::getScan()->stop();
+    Serial.printf(
+      "Priority OLED display discovered at %s; claiming the single endpoint slot.\n",
+      displayCandidateAddress.toString().c_str()
+    );
+  }
+};
+
+bool displayOwnsEndpointSlot() {
+  return displayCandidateFound || displayConnecting || displayConnected;
+}
+
 void restartAdvertisingAfterDisconnect() {
-  if (!advertisingRestartPending || clientConnected) {
+  if (!advertisingRestartPending || clientConnected || displayOwnsEndpointSlot()) {
     return;
   }
 
@@ -1237,15 +1330,113 @@ void restartAdvertisingAfterDisconnect() {
   Serial.println("BLE advertising restarted; waiting for one client.");
 }
 
+void startDisplayScanIfNeeded() {
+  if (displayOwnsEndpointSlot()
+      || static_cast<long>(millis() - displayScanRetryAt) < 0) {
+    return;
+  }
+
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  if (scan->isScanning()) {
+    return;
+  }
+  scan->start(0, false, true);
+  Serial.println("Scanning continuously for the priority OLED display.");
+}
+
+void releaseDisplayCandidate() {
+  displayDataCharacteristic = nullptr;
+  displayCandidateFound = false;
+  displayConnecting = false;
+  displayConnected = false;
+  displayScanRetryAt = millis() + DISPLAY_RETRY_DELAY_MS;
+  advertisingRestartRequestedAt = millis();
+  advertisingRestartPending = true;
+}
+
+void connectPriorityDisplayIfFound() {
+  if (!displayCandidateFound || displayConnecting || displayConnected) {
+    return;
+  }
+
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  if (advertising->isAdvertising()) {
+    advertising->stop();
+    Serial.println("Stopped iOS/Web advertising for the priority OLED display.");
+  }
+
+  // A powered display always wins. Wait for the server-side disconnect callback
+  // before opening the central-side link so there is never more than one endpoint.
+  if (clientConnected) {
+    const uint16_t handle = clientConnectionHandle;
+    if (sensorServer != nullptr && handle != BLE_HS_CONN_HANDLE_NONE) {
+      Serial.println("Disconnecting iOS/Web because the OLED display is powered on.");
+      sensorServer->disconnect(handle);
+    }
+    return;
+  }
+
+  displayConnecting = true;
+  NimBLEDevice::getScan()->stop();
+
+  if (displayClient == nullptr) {
+    displayClient = NimBLEDevice::createClient();
+    if (displayClient == nullptr) {
+      Serial.println("ERROR: Could not allocate BLE client for OLED display.");
+      releaseDisplayCandidate();
+      return;
+    }
+    displayClient->setClientCallbacks(new DisplayClientCallbacks(), true);
+    displayClient->setConnectionParams(12, 24, 0, 200);
+    displayClient->setConnectTimeout(3000);
+    displayClient->setConnectRetries(2);
+  }
+
+  Serial.printf(
+    "Connecting to priority OLED display at %s...\n",
+    displayCandidateAddress.toString().c_str()
+  );
+  if (!displayClient->connect(displayCandidateAddress)) {
+    Serial.println("Priority OLED display connection failed; retrying immediately.");
+    releaseDisplayCandidate();
+    return;
+  }
+
+  NimBLERemoteService *service = displayClient->getService(DISPLAY_SERVICE_UUID);
+  if (service == nullptr) {
+    Serial.println("ERROR: OLED display service is missing.");
+    displayClient->disconnect();
+    return;
+  }
+
+  displayDataCharacteristic = service->getCharacteristic(
+    DISPLAY_DATA_CHARACTERISTIC_UUID
+  );
+  if (displayDataCharacteristic == nullptr
+      || (!displayDataCharacteristic->canWrite()
+          && !displayDataCharacteristic->canWriteNoResponse())) {
+    Serial.println("ERROR: OLED display data characteristic is not writable.");
+    displayClient->disconnect();
+    return;
+  }
+
+  displayCandidateFound = false;
+  displayConnecting = false;
+  displayConnected = true;
+  displayImmediateSamplePending = true;
+  advertisingRestartPending = false;
+  Serial.println("Priority OLED display claimed; taking an immediate sensor sample.");
+}
+
 void initializeBLE() {
   controlCommandQueue = xQueueCreate(8, sizeof(QueuedCommand));
   // NimBLE preserves the GATT protocol while leaving substantially more heap
   // available for TLS than the original Bluedroid stack.
   NimBLEDevice::init(DEVICE_NAME);
 
-  NimBLEServer *server = NimBLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
-  NimBLEService *service = server->createService(SERVICE_UUID);
+  sensorServer = NimBLEDevice::createServer();
+  sensorServer->setCallbacks(new ServerCallbacks());
+  NimBLEService *service = sensorServer->createService(SERVICE_UUID);
 
   dataCharacteristic = service->createCharacteristic(
     DATA_CHARACTERISTIC_UUID,
@@ -1269,7 +1460,15 @@ void initializeBLE() {
   advertising->setPreferredParams(0x06, 0x12);
   NimBLEDevice::startAdvertising();
 
-  Serial.println("BLE advertising with live, control, and history characteristics.");
+  NimBLEScan *displayScan = NimBLEDevice::getScan();
+  displayScan->setScanCallbacks(new DisplayScanCallbacks(), false);
+  displayScan->setActiveScan(true);
+  displayScan->setInterval(45);
+  displayScan->setWindow(30);
+  displayScan->setMaxResults(0);
+  displayScan->start(0, false, true);
+
+  Serial.println("BLE advertising for iOS/Web and scanning for the priority OLED display.");
 }
 
 void processControlCommands() {
@@ -2073,8 +2272,23 @@ void setup() {
 
 void loop() {
   updateWiFiStatusLED(millis());
+  connectPriorityDisplayIfFound();
+  startDisplayScanIfNeeded();
   restartAdvertisingAfterDisconnect();
   processControlCommands();
+
+  if (displayImmediateSamplePending
+      && displayConnected
+      && displayDataCharacteristic != nullptr) {
+    displayImmediateSamplePending = false;
+    // If this is the first endpoint after boot, use this sample as the normal
+    // initial sample instead of creating a second record 15 seconds later.
+    if (initialSamplePending) {
+      initialSamplePending = false;
+      lastSampleTime = millis();
+    }
+    sampleStoreAndPublish();
+  }
 
   const unsigned long now = millis();
   if (initialSamplePending
