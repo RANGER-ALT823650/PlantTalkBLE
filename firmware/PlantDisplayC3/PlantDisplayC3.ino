@@ -86,45 +86,49 @@ void renderDisplay() {
   display.clearBuffer();
   display.setDrawColor(1);
   display.setFont(u8g2_font_6x10_tf);
-  display.drawStr(0, 8, "Plant Monitor");
-  display.drawStr(98, 8, mainConnected ? "BLE" : "WAIT");
-  display.drawHLine(0, 10, 128);
 
   if (!hasReading) {
-    display.setCursor(0, 23);
+    display.setCursor(0, 16);
     display.print(mainConnected ? "Main ESP32 connected" : "Waiting for main ESP32");
-    display.setCursor(0, 38);
+    display.setCursor(0, 32);
     display.print("Waiting for live data");
-    display.setCursor(0, 53);
+    display.setCursor(0, 48);
     display.print("Display has priority");
     display.sendBuffer();
     return;
   }
 
   char value[22] = {};
+
+  // 第1行：Temperature (左) + Humidity (右)
   if (sensorValuesValid) {
     snprintf(value, sizeof(value), "%.1f C", temperature);
   } else {
     snprintf(value, sizeof(value), "-- C");
   }
-  drawTextValue("Temp", value, 22);
+  display.setCursor(0, 42);
+  display.print(value);
 
   if (sensorValuesValid) {
     snprintf(value, sizeof(value), "%.1f %%", humidity);
   } else {
     snprintf(value, sizeof(value), "-- %%");
   }
-  drawTextValue("Humidity", value, 34);
+  display.setCursor(70, 42);
+  display.print(value);
+
+  // 第2行：Soil (左) + Light (右)
+  snprintf(value, sizeof(value), "%u raw", soilRaw);
+  display.setCursor(0, 57);
+  display.print(value);
 
   if (lightValueValid) {
     snprintf(value, sizeof(value), "%.0f lx", lightLux);
   } else {
     snprintf(value, sizeof(value), "-- lx");
   }
-  drawTextValue("Light", value, 46);
-
-  snprintf(value, sizeof(value), "%u raw", soilRaw);
-  drawTextValue("Soil", value, 58);
+  display.setCursor(70, 57);
+  display.print(value);
 
   // Keep the screen stable between real sensor samples. The old per-second
   // packet-age counter was not useful on this dedicated display.
