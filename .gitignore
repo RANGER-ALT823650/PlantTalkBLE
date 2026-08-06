@@ -26,6 +26,10 @@ sketch_jul3a/
 # HarmonyOS移植工程
 harmony/PlantTalk/
 
+# Documentation & Internal Notes
+docs/
+HUMAN_ONLY/
+
 
 
 
