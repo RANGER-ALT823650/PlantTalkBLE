@@ -60,6 +60,51 @@ ESP32-WROOM-32E 使用 `ESP32 Dev Module`、`4MB (32Mb)`，Partition Scheme 选�
 
 BH1750 已在代码中启用，`ENABLE_BH1750` 为 `true`；启动时应通过 I2C 扫描发现地址 `0x23`。
 
+### 硬件接线图（ESP32-WROOM-32E）
+
+所有传感器与 ESP32 **共地**，并统一接 ESP32 的 **3V3** 供电。SHT31 和 BH1750 共用
+同一条 I²C 总线；土壤传感器只使用模拟输出 `AOUT`。下图和表格对应
+`PlantSensorBLE.ino` 中的实际引脚定义：SDA=`GPIO21`、SCL=`GPIO22`、土壤 ADC=`GPIO34`。
+
+```mermaid
+flowchart LR
+    ESP["ESP32-WROOM-32E"]
+    SHT["SHT31\n温度 / 空气湿度"]
+    BH["BH1750\n光照"]
+    SOIL["电容式土壤湿度传感器\n模拟输出"]
+
+    ESP -- "3V3" --> SHT
+    ESP -- "3V3" --> BH
+    ESP -- "3V3" --> SOIL
+    SHT -- "GND" --- ESP
+    BH -- "GND" --- ESP
+    SOIL -- "GND" --- ESP
+    ESP -- "GPIO21 (SDA)" --- SHT
+    ESP -- "GPIO21 (SDA)" --- BH
+    ESP -- "GPIO22 (SCL)" --- SHT
+    ESP -- "GPIO22 (SCL)" --- BH
+    SOIL -- "AOUT -> GPIO34 (ADC)" --> ESP
+```
+
+| 设备 | 设备引脚 | ESP32-WROOM-32E 引脚 | 说明 |
+| --- | --- | --- | --- |
+| SHT31 温湿度传感器 | VIN / VCC | 3V3 | 使用 3.3V 供电 |
+|  | GND | GND | 必须与所有设备共地 |
+|  | SDA | GPIO21 | 与 BH1750 并联的 I²C 数据线 |
+|  | SCL | GPIO22 | 与 BH1750 并联的 I²C 时钟线 |
+| BH1750 光照传感器 | VCC | 3V3 | 使用 3.3V 供电 |
+|  | GND | GND | 必须与所有设备共地 |
+|  | SDA | GPIO21 | 与 SHT31 共用 I²C 数据线 |
+|  | SCL | GPIO22 | 与 SHT31 共用 I²C 时钟线 |
+| 电容式土壤湿度传感器 | VCC | 3V3 | 不要以 5V 供电，否则模拟输出可能超过 ESP32 ADC 的 3.3V 上限 |
+|  | GND | GND | 必须与所有设备共地 |
+|  | AOUT / AO | GPIO34 | 12 位 ADC 原始值；GPIO34 仅作输入 |
+|  | DOUT / DO（若有） | 不接 | 本项目不使用比较器数字输出 |
+
+> 注意：不同模块的丝印可能写作 `VCC`/`VIN`、`AOUT`/`AO`。接线前请按模块实际丝印核对；
+> 不要把任一传感器的 5V 逻辑电平直接接入 ESP32 GPIO。SHT31 默认 I²C 地址为 `0x44`，
+> BH1750 默认地址为 `0x23`；上传后可通过串口的 I²C 扫描结果确认二者均已接通。
+
 上传后串口应显示：
 
 ```text
